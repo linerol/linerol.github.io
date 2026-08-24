@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linerol Tchecounnou — Développeur mobile, SDK Flutter</title>
+<meta name="description" content="Développeur mobile. Je travaille sur un SDK Flutter add-to-app embarqué dans des applications Android, iOS et React Native.">
+<meta property="og:title" content="Linerol Tchecounnou — Développeur mobile, SDK Flutter">
+<meta property="og:description" content="Je livre du Flutter à des applications qui ne sont pas en Flutter.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#EFF2F1;
+    --card:#FFFFFF;
+    --ink:#0D1517;
+    --body:#26383A;
+    --muted:#5B6A6C;
+    --hair:#D2DAD9;
+    --teal:#0F5C5B;
+    --teal-soft:#DFEBEA;
+    --rust:#A2382C;
+
+    --display:"Archivo",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+
+    --wrap:900px;
+    --gut:clamp(20px,5vw,48px);
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0;}
+
+  html{scroll-behavior:smooth;}
+  @media (prefers-reduced-motion:reduce){
+    html{scroll-behavior:auto;}
+    *,*::before,*::after{animation:none!important;transition:none!important;}
+  }
+
+  body{
+    background:var(--paper);
+    color:var(--body);
+    font-family:var(--sans);
+    font-size:clamp(15px,1.05vw,16.5px);
+    line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  .wrap{max-width:var(--wrap);margin:0 auto;padding:0 var(--gut);}
+
+  a{color:inherit;}
+  a:focus-visible,button:focus-visible{outline:2px solid var(--teal);outline-offset:3px;border-radius:2px;}
+
+  .mono{font-family:var(--mono);}
+
+  /* ---------- top bar ---------- */
+  .bar{
+    border-bottom:1px solid var(--hair);
+    position:sticky;top:0;z-index:20;
+    background:rgba(239,242,241,.88);
+    backdrop-filter:blur(8px);
+  }
+  .bar .wrap{
+    display:flex;justify-content:space-between;align-items:center;
+    gap:16px;padding-top:14px;padding-bottom:14px;
+    font-family:var(--mono);font-size:12.5px;letter-spacing:.03em;
+  }
+  .bar .who{font-weight:600;color:var(--ink);text-decoration:none;}
+  .bar .who span{color:var(--muted);font-weight:400;}
+  .avail{display:inline-flex;align-items:center;gap:7px;color:var(--muted);white-space:nowrap;}
+  .dot{
+    width:7px;height:7px;border-radius:50%;background:var(--teal);
+    box-shadow:0 0 0 0 rgba(15,92,91,.45);
+    animation:pulse 2.6s ease-out infinite;
+  }
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(15,92,91,.45);}
+    70%{box-shadow:0 0 0 7px rgba(15,92,91,0);}
+    100%{box-shadow:0 0 0 0 rgba(15,92,91,0);}
+  }
+
+  /* ---------- hero ---------- */
+  .hero{padding:clamp(48px,9vw,104px) 0 clamp(36px,6vw,64px);}
+
+  h1{
+    font-family:var(--display);
+    font-variation-settings:"wdth" 112;
+    font-weight:600;
+    font-size:clamp(30px,5.2vw,54px);
+    line-height:1.06;
+    letter-spacing:-.022em;
+    color:var(--ink);
+    max-width:16ch;
+  }
+  h1 em{font-style:normal;color:var(--teal);}
+
+  .lede{
+    margin-top:22px;
+    font-size:clamp(16px,1.5vw,19px);
+    line-height:1.55;
+    color:var(--body);
+    max-width:56ch;
+  }
+
+  .actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:30px;}
+  .btn{
+    font-family:var(--mono);font-size:12.5px;letter-spacing:.05em;
+    text-transform:uppercase;text-decoration:none;
+    padding:11px 18px;border:1px solid var(--ink);color:var(--ink);
+    background:transparent;transition:background .18s ease,color .18s ease;
+  }
+  .btn:hover{background:var(--ink);color:var(--paper);}
+  .btn.solid{background:var(--teal);border-color:var(--teal);color:#fff;}
+  .btn.solid:hover{background:#0B4746;border-color:#0B4746;}
+
+  /* ---------- artifact card (signature) ---------- */
+  .artifact{
+    background:var(--card);
+    border:1px solid var(--hair);
+    margin-top:clamp(40px,6vw,64px);
+  }
+  .artifact-head{
+    display:flex;justify-content:space-between;align-items:baseline;
+    gap:14px;flex-wrap:wrap;
+    padding:16px 20px;border-bottom:1px solid var(--hair);
+    font-family:var(--mono);font-size:12px;letter-spacing:.06em;
+  }
+  .artifact-head .t{color:var(--ink);font-weight:600;text-transform:uppercase;}
+  .artifact-head .n{color:var(--muted);}
+
+  table{width:100%;border-collapse:collapse;}
+  th{
+    text-align:left;font-family:var(--mono);font-size:10.5px;font-weight:500;
+    letter-spacing:.13em;text-transform:uppercase;color:var(--muted);
+    padding:12px 20px 9px;border-bottom:1px solid var(--hair);
+  }
+  td{
+    padding:15px 20px;border-bottom:1px solid var(--hair);
+    font-size:14px;vertical-align:top;
+  }
+  tr:last-child td{border-bottom:0;}
+  td.plat{font-weight:600;color:var(--ink);white-space:nowrap;}
+  td.art{font-family:var(--mono);font-size:12.5px;color:var(--body);}
+  td.reg{font-family:var(--mono);font-size:12px;color:var(--muted);}
+  td.note{color:var(--muted);font-size:13.5px;}
+
+  .was{color:var(--rust);text-decoration:line-through;text-decoration-thickness:1px;}
+  .now{color:var(--teal);font-weight:600;}
+  .arrow{color:var(--muted);margin:0 5px;}
+
+  .artifact-foot{
+    padding:13px 20px;
+    font-family:var(--mono);font-size:11.5px;color:var(--muted);
+    border-top:1px solid var(--hair);background:#FBFCFC;
+  }
+
+  /* ---------- sections ---------- */
+  section{padding:clamp(46px,7vw,84px) 0;border-top:1px solid var(--hair);}
+
+  .eyebrow{
+    font-family:var(--mono);font-size:11px;font-weight:600;
+    letter-spacing:.2em;text-transform:uppercase;color:var(--teal);
+    margin-bottom:20px;
+  }
+  h2{
+    font-family:var(--display);font-variation-settings:"wdth" 106;
+    font-weight:600;font-size:clamp(22px,3vw,31px);line-height:1.15;
+    letter-spacing:-.015em;color:var(--ink);margin-bottom:26px;max-width:22ch;
+  }
+  h3{
+    font-family:var(--sans);font-weight:600;font-size:17px;
+    color:var(--ink);letter-spacing:-.005em;
+  }
+
+  .grid3{display:grid;gap:30px;grid-template-columns:repeat(3,1fr);}
+  .cell p{margin-top:9px;font-size:14.5px;line-height:1.58;color:var(--muted);}
+  .cell .tags{
+    margin-top:12px;font-family:var(--mono);font-size:11.5px;
+    line-height:1.7;color:var(--teal);
+  }
+
+  /* projects */
+  .proj{
+    display:grid;grid-template-columns:1fr 1fr;gap:30px 40px;
+  }
+  .proj article{border-top:2px solid var(--ink);padding-top:16px;}
+  .proj .meta{
+    font-family:var(--mono);font-size:11.5px;letter-spacing:.05em;
+    color:var(--muted);margin-bottom:7px;
+  }
+  .proj p{margin-top:9px;font-size:14.5px;color:var(--muted);line-height:1.58;}
+  .proj a.repo{
+    display:inline-block;margin-top:13px;font-family:var(--mono);font-size:12px;
+    color:var(--teal);text-decoration:none;border-bottom:1px solid var(--teal-soft);
+    padding-bottom:2px;
+  }
+  .proj a.repo:hover{border-bottom-color:var(--teal);}
+
+  /* timeline */
+  .tl{list-style:none;}
+  .tl li{
+    display:grid;grid-template-columns:150px 1fr;gap:22px;
+    padding:15px 0;border-bottom:1px solid var(--hair);
+  }
+  .tl li:last-child{border-bottom:0;}
+  .tl .when{font-family:var(--mono);font-size:12px;color:var(--muted);padding-top:2px;letter-spacing:.02em;}
+  .tl .what b{display:block;color:var(--ink);font-weight:600;font-size:15.5px;}
+  .tl .what span{font-size:14px;color:var(--muted);}
+
+  /* contact */
+  .contact h2{max-width:26ch;}
+  .mail{
+    font-family:var(--display);font-variation-settings:"wdth" 100;
+    font-weight:500;font-size:clamp(20px,3.4vw,34px);
+    color:var(--ink);text-decoration:none;letter-spacing:-.02em;
+    border-bottom:2px solid var(--teal-soft);padding-bottom:4px;
+    display:inline-block;transition:border-color .18s ease;
+    word-break:break-word;
+  }
+  .mail:hover{border-bottom-color:var(--teal);}
+  .elsewhere{
+    margin-top:30px;display:flex;flex-wrap:wrap;gap:8px 24px;
+    font-family:var(--mono);font-size:12.5px;
+  }
+  .elsewhere a{color:var(--muted);text-decoration:none;border-bottom:1px solid transparent;}
+  .elsewhere a:hover{color:var(--teal);border-bottom-color:var(--teal);}
+
+  footer{
+    border-top:1px solid var(--hair);padding:26px 0 40px;
+    font-family:var(--mono);font-size:11.5px;color:var(--muted);
+  }
+
+  /* page-load reveal */
+  .rise{opacity:0;transform:translateY(14px);animation:rise .7s cubic-bezier(.2,.7,.3,1) forwards;}
+  .rise:nth-child(1){animation-delay:.04s}
+  .d1{animation-delay:.10s}.d2{animation-delay:.18s}.d3{animation-delay:.26s}.d4{animation-delay:.36s}
+  @keyframes rise{to{opacity:1;transform:none;}}
+  @media (prefers-reduced-motion:reduce){.rise{opacity:1;transform:none;}}
+
+  /* ---------- responsive ---------- */
+  @media (max-width:760px){
+    .grid3{grid-template-columns:1fr;gap:26px;}
+    .proj{grid-template-columns:1fr;}
+    .tl li{grid-template-columns:1fr;gap:5px;}
+    h1{max-width:none;}
+  }
+  @media (max-width:620px){
+    .artifact table,.artifact thead,.artifact tbody,.artifact tr,.artifact td{display:block;width:100%;}
+    .artifact thead{display:none;}
+    .artifact tr{border-bottom:1px solid var(--hair);padding:6px 0;}
+    .artifact tr:last-child{border-bottom:0;}
+    .artifact td{border-bottom:0;padding:5px 20px;}
+    td.plat{padding-top:15px;font-size:15px;}
+    td.note{padding-bottom:15px;}
+  }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <div class="wrap">
+    <a class="who" href="#top">Linerol Tchecounnou <span>— développeur mobile</span></a>
+    <span class="avail"><span class="dot" aria-hidden="true"></span>Disponible en décembre 2026</span>
+  </div>
+</div>
+
+<main id="top">
+
+  <!-- ================= HERO ================= -->
+  <div class="hero">
+    <div class="wrap">
+      <h1 class="rise">Je livre du Flutter à des applications qui <em>ne sont pas</em> en Flutter.</h1>
+
+      <p class="lede rise d1">
+        Je travaille sur un SDK Flutter add-to-app que des clients embarquent dans leurs propres
+        applications Android natives, iOS natives et React Native. L'essentiel du travail n'est pas
+        dans le Dart : il est dans le packaging binaire, le pont natif, le poids livré et la chaîne
+        de release.
+      </p>
+
+      <div class="actions rise d2">
+        <a class="btn solid" href="CV_Linerol_Tchecounnou.pdf">Télécharger le CV</a>
+        <a class="btn" href="https://github.com/linerol">GitHub</a>
+        <a class="btn" href="https://www.linkedin.com/in/linerol/">LinkedIn</a>
+      </div>
+
+      <!-- signature element : la page de release du SDK -->
+      <div class="artifact rise d3">
+        <div class="artifact-head">
+          <span class="t">SDK Flutter add-to-app</span>
+          <span class="n">un cœur Flutter, trois cibles natives</span>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Cible</th>
+              <th scope="col">Artefact</th>
+              <th scope="col">Distribution</th>
+              <th scope="col">Le point dur</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="plat">Android</td>
+              <td class="art">AAR fused</td>
+              <td class="reg">Maven · JitPack</td>
+              <td class="note">
+                Moteur Flutter&nbsp;:
+                <span class="was">156&nbsp;Mo / ABI</span><span class="arrow">→</span><span class="now">&lt;&nbsp;20&nbsp;Mo</span>
+              </td>
+            </tr>
+            <tr>
+              <td class="plat">iOS</td>
+              <td class="art">xcframeworks</td>
+              <td class="reg">SPM · CocoaPods</td>
+              <td class="note">Signature laissée à l'app hôte, sans casser celle du moteur.</td>
+            </tr>
+            <tr>
+              <td class="plat">React&nbsp;Native</td>
+              <td class="art">package npm</td>
+              <td class="reg">npm</td>
+              <td class="note">Embarque les binaires Android et iOS, plus le pont natif.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="artifact-foot">Publié depuis un tag, en un seul run de CI.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= CE QUE JE FAIS ================= -->
+  <section>
+    <div class="wrap">
+      <p class="eyebrow">Ce sur quoi je suis utile</p>
+      <h2>Faire cohabiter Flutter avec du code natif qui existait déjà</h2>
+
+      <div class="grid3">
+        <div class="cell">
+          <h3>Le poids livré</h3>
+          <p>
+            Un SDK s'ajoute à l'application de quelqu'un d'autre. Chaque mégaoctet se négocie.
+            J'automatise le nettoyage des moteurs Flutter et leur injection dans l'artefact final,
+            en coupant les dépendances qui feraient retélécharger les binaires lourds côté client.
+          </p>
+          <p class="tags">Gradle · Maven · llvm-strip · ABI filters</p>
+        </div>
+
+        <div class="cell">
+          <h3>Le pont natif</h3>
+          <p>
+            Les applications hôtes parlent Kotlin et Swift, le SDK parle Dart. J'entretiens et
+            j'étends un pont typé entre les deux, ainsi que l'intégration côté hôte : Fragment
+            Android, ViewController iOS, ViewManagers React Native.
+          </p>
+          <p class="tags">Pigeon · Kotlin · Swift · add-to-app</p>
+        </div>
+
+        <div class="cell">
+          <h3>La release</h3>
+          <p>
+            Un tag déclenche tout : builds Android et iOS en parallèle, publication sur les
+            registres, et une politique de signature propre aux SDK — livrer non signé, laisser
+            l'app cliente signer, sans invalider la signature du moteur Flutter.
+          </p>
+          <p class="tags">GitHub Actions · SPM · CocoaPods · npm</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= PROJETS ================= -->
+  <section>
+    <div class="wrap">
+      <p class="eyebrow">Projets</p>
+      <h2>Ce que je construis en dehors du travail</h2>
+
+      <div class="proj">
+        <article>
+          <p class="meta">2026 · React Native · Expo · TypeScript</p>
+          <h3>Odomo</h3>
+          <p>
+            Un compagnon virtuel dont l'état dépend de l'activité physique réelle. Lecture des pas
+            via Apple HealthKit, synchronisation incrémentale avec le backend, économie in-game.
+            Expo Router, Zustand, React Query, thème clair et sombre, français et anglais.
+          </p>
+          <a class="repo" href="https://github.com/linerol/Odomo-mobile-app">github.com/linerol/Odomo-mobile-app</a>
+        </article>
+
+        <article>
+          <p class="meta">2025–2026 · Node.js · GraphQL · Docker</p>
+          <h3>Sodalis</h3>
+          <p>
+            Une plateforme de gestion de colocation en micro-services conteneurisés. API GraphQL
+            avec Apollo, temps réel par Socket.io, persistance répartie sur PostgreSQL, MongoDB
+            et Redis.
+          </p>
+          <a class="repo" href="https://github.com/Sodalis-Org">github.com/Sodalis-Org</a>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= PARCOURS ================= -->
+  <section>
+    <div class="wrap">
+      <p class="eyebrow">Parcours</p>
+      <h2>Où j'ai appris tout ça</h2>
+
+      <ul class="tl">
+        <li>
+          <span class="when">déc. 2025 — nov. 2026</span>
+          <span class="what"><b>Développeur mobile Flutter — Azeoo</b>
+          <span>Alternance, full remote. SDK Flutter add-to-app, distribution multi-plateforme, plus de vingt fonctionnalités livrées.</span></span>
+        </li>
+        <li>
+          <span class="when">jan. — juil. 2025</span>
+          <span class="what"><b>Développeur mobile &amp; IoT — Cardiomedical</b>
+          <span>Refonte de l'application en Flutter, dispositifs médicaux connectés en Bluetooth Low Energy, API NestJS.</span></span>
+        </li>
+        <li>
+          <span class="when">mars — août 2024</span>
+          <span class="what"><b>Développeur full-stack — LKA Services</b>
+          <span>API NestJS et MongoDB pour la gestion de stock, dashboard analytique temps réel.</span></span>
+        </li>
+        <li>
+          <span class="when">2022 — 2024</span>
+          <span class="what"><b>Tuteur en programmation — Epitech</b>
+          <span>Deux ans d'accompagnement des promotions inférieures : cours, suivi de projets, aide au débogage.</span></span>
+        </li>
+        <li>
+          <span class="when">2021 — 2026</span>
+          <span class="what"><b>Epitech, puis mastère à Ynov</b>
+          <span>Bachelor informatique à Cotonou, puis mastère développement logiciel, mobile et IoT à Paris.</span></span>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <!--
+  ================= ÉCRITS =================
+  À décommenter le jour où l'article est publié. Titre suggéré :
+  « Réduire le poids d'un SDK Flutter add-to-app livré en AAR »
+
+  <section>
+    <div class="wrap">
+      <p class="eyebrow">Écrits</p>
+      <h2>Notes techniques</h2>
+      <div class="proj">
+        <article>
+          <p class="meta">2026 · Flutter · Android</p>
+          <h3>Réduire le poids d'un SDK Flutter add-to-app</h3>
+          <p>Pourquoi le moteur Flutter arrive non nettoyé dans un AAR, ce que ça coûte à l'intégrateur, et comment automatiser le nettoyage sans casser la résolution de dépendances.</p>
+          <a class="repo" href="#">Lire l'article</a>
+        </article>
+      </div>
+    </div>
+  </section>
+  -->
+
+  <!-- ================= CONTACT ================= -->
+  <section class="contact">
+    <div class="wrap">
+      <p class="eyebrow">Contact</p>
+      <h2>Je cherche un CDI en développement mobile, à partir de décembre 2026.</h2>
+      <a class="mail" href="mailto:linerol@icloud.com">linerol@icloud.com</a>
+
+      <div class="elsewhere">
+        <a href="https://github.com/linerol">github.com/linerol</a>
+        <a href="https://www.linkedin.com/in/linerol/">linkedin.com/in/linerol</a>
+        <a href="CV_Linerol_Tchecounnou.pdf">CV en PDF</a>
+        <span>France entière et full remote</span>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">Linerol Tchecounnou — 2026</div>
+</footer>
+
+</body>
+</html>
