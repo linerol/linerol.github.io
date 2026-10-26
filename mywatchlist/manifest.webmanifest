@@ -1,7 +1,7 @@
 {
-  "name": "My Watchlist",
+  "name": "Watchlist de Linerol",
   "short_name": "Watchlist",
-  "description": "Ma liste d'animes, de mangas et de séries.",
+  "description": "La liste de Linerol d'animes, de mangas et de séries.",
   "lang": "fr",
   "start_url": "./",
   "scope": "./",

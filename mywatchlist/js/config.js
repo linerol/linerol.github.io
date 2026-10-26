@@ -12,3 +12,6 @@ export const firebaseConfig = {
 
 // Adresse vers laquelle renvoient les emails de vérification et de mot de passe.
 export const SITE_URL = location.origin + location.pathname.replace(/[^/]*$/, '');
+
+// Prénom affiché partout sur le site.
+export const OWNER = 'Linerol';

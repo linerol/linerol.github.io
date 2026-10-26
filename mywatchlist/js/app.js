@@ -1,7 +1,7 @@
 import * as F from './firebase.js';
 import { FAMILIES, STATUSES, STATUS_ORDER, KINDS, SEED, familyFromGenres } from './data.js';
 import { searchTitles, upcomingEpisodes } from './external.js';
-import { SITE_URL } from './config.js';
+import { SITE_URL, OWNER } from './config.js';
 
 /* ------------------------------------------------------------------ état */
 
@@ -21,7 +21,11 @@ const S = {
   draft: null,                 // brouillon de la fiche ouverte
   add: { kind: 'anime', q: '', results: [], busy: false, err: '', chosen: null, note: '', status: 'voir' },
   fix: { open: false, q: '', results: [], busy: false },
-  newMember: { email: '', role: 'reader', msg: '' },
+  newMember: { email: '', role: 'reader', msg: '', invite: '' },
+  adminLog: [],
+  seen: {},                    // titleId -> [{ id: email, name, rating }]
+  follows: null,               // { titles: { id: { status, season, episode, chapter } } }
+  welcomeOpen: false,
   toast: null,
   unsub: []
 };
@@ -103,7 +107,7 @@ function route() {
   if (name === 'mangas') return { name: 'list', section: 'manga' };
   if (name === 'series') return { name: 'list', section: 'serie' };
   if (name === 'titre' && id) return { name: 'title', id: decodeURIComponent(id) };
-  if (['ajouter', 'valider', 'membres', 'stats'].includes(name)) return { name };
+  if (['ajouter', 'valider', 'membres', 'stats', 'avis', 'aide'].includes(name)) return { name };
   return { name: 'list' };
 }
 
@@ -134,6 +138,8 @@ function view() {
   else if (r.name === 'valider') main = isAdmin() ? viewValidate() : viewList();
   else if (r.name === 'membres') main = isAdmin() ? viewMembers() : viewList();
   else if (r.name === 'stats') main = viewStats();
+  else if (r.name === 'avis') main = viewReviews();
+  else if (r.name === 'aide') main = viewHelp();
   else main = viewList();
   return shell(r, main);
 }
@@ -160,7 +166,7 @@ function viewLogin() {
         <div class="field"><label for="lemail">Email</label><input id="lemail" name="email" type="email" autocomplete="email" value="${esc(L.email)}" data-in="loginEmail" required></div>
         <div class="field"><label for="lpwd">${create ? 'Choisis un mot de passe' : 'Mot de passe'}</label>
           <input id="lpwd" name="password" type="password" minlength="${create ? 8 : 1}" autocomplete="${create ? 'new-password' : 'current-password'}" required>
-          ${create ? '<span class="hint">8 caractères minimum. Ton email doit avoir été invité par Nerol.</span>' : ''}
+          ${create ? `<span class="hint">8 caractères minimum. Ton email doit avoir été invité par ${OWNER}.</span>` : ''}
         </div>
         <button class="btn ${create ? 'btn-accent' : 'btn-ink'} btn-lg" ${L.busy ? 'disabled' : ''}>${create ? 'Créer mon mot de passe' : 'Entrer'}</button>
         ${create ? '' : '<button type="button" class="link" data-act="loginMode" data-mode="forgot">Mot de passe oublié ?</button>'}
@@ -169,12 +175,12 @@ function viewLogin() {
   return `
   <div class="solo"><div class="solo-in">
     <span class="stamp-xl" aria-hidden="true">視聴</span>
-    <h1 class="display">My<br>Watchlist</h1>
-    <p class="muted">Espace privé. Seuls les emails invités peuvent entrer.</p>
+    <span class="mono muted">LA WATCHLIST DE ${OWNER.toUpperCase()}</span>
+    <h1 class="display">Watchlist<br>de ${OWNER}</h1>
+    <p class="muted">Les animes, mangas et séries de ${OWNER}. C’est un espace privé : on y entre sur invitation, avec l’email que ${OWNER} a autorisé.</p>
     ${L.err ? `<p class="alert" role="alert">${esc(L.err)}</p>` : ''}
     ${L.msg ? `<p class="note" role="status">${esc(L.msg)}</p>` : ''}
     ${body}
-    <a class="foot-link" href="../">← linerol.github.io</a>
   </div></div>`;
 }
 
@@ -200,7 +206,8 @@ function viewDenied() {
     <span class="stamp-ban" aria-hidden="true">禁</span>
     <p class="mono muted">CONNECTÉ EN TANT QUE ${esc(S.email)}</p>
     <h1 class="display-sm">Accès réservé</h1>
-    <p>Ton email n’est pas encore sur la liste des invités. Laisse un mot à Nerol : il recevra ta demande dans son espace « À valider ».</p>
+    <p>Cette page est la watchlist personnelle de ${OWNER}. On y entre sur invitation, et ton email n’est pas encore sur la liste.</p>
+    <p class="muted">Laisse-lui un mot : il recevra ta demande et pourra t’ouvrir l’accès.</p>
     ${S.myAccess ? `
       <div class="panel"><b>Demande envoyée.</b><br><span class="muted">Reviens plus tard : la page s’ouvrira dès que ta demande sera acceptée.</span></div>
       <button class="btn btn-ghost" data-act="retryMember">Vérifier à nouveau</button>` : `
@@ -208,7 +215,7 @@ function viewDenied() {
         <div class="field"><label for="anote">Un mot pour te présenter (facultatif)</label><textarea id="anote" name="note" rows="3" maxlength="400" placeholder="Salut, c’est…"></textarea></div>
         <button class="btn btn-accent btn-lg">Demander l’accès</button>
       </form>`}
-    <div class="row-between"><button class="link" data-act="logout">Se déconnecter</button><a class="link" href="../">Voir le portfolio</a></div>
+    <button class="link" data-act="logout">Se déconnecter</button>
   </div></div>`;
 }
 
@@ -241,9 +248,11 @@ function shell(r, main) {
       <div class="row-between"><b>${esc(S.member && S.member.name || S.email)}</b><span class="mono muted">${roleLabel.toUpperCase()}</span></div>
       <nav class="sheet-nav">
         <a href="#/" data-act="closeSheet">Liste</a>
+        <a href="#/avis" data-act="closeSheet">Les avis de ${OWNER}</a>
         <a href="#/ajouter" data-act="closeSheet">${addLabel}</a>
         ${admin ? `<a href="#/valider" data-act="closeSheet">À valider ${n ? `<span class="badge">${n}</span>` : ''}</a><a href="#/membres" data-act="closeSheet">Membres</a>` : ''}
         <a href="#/stats" data-act="closeSheet">Stats et historique</a>
+        <a href="#/aide" data-act="closeSheet">Comment ça marche</a>
       </nav>
       <button class="btn btn-ghost" data-act="logout">Se déconnecter</button>
     </div>` : '';
@@ -251,20 +260,22 @@ function shell(r, main) {
   return `
   <header class="top">
     <div class="wrap top-in">
-      <a href="#/" class="brand"><span class="brand-stamp" aria-hidden="true">視</span><span>My Watchlist</span></a>
+      <a href="#/" class="brand"><span class="brand-stamp" aria-hidden="true">視</span><span>Watchlist <span class="brand-of">de ${OWNER}</span></span></a>
       <nav class="nav-desk" aria-label="Navigation">
         ${link('#/', 'Liste', isList)}
+        ${link('#/avis', 'Avis', r.name === 'avis')}
         ${link('#/ajouter', addLabel, r.name === 'ajouter')}
         ${admin ? link('#/valider', 'À valider', r.name === 'valider', n) : ''}
         ${admin ? link('#/membres', 'Membres', r.name === 'membres') : ''}
         ${link('#/stats', 'Stats', r.name === 'stats')}
       </nav>
+      ${admin ? '' : `<a href="#/aide" class="role-chip" title="Ce que ton rôle permet">${roleLabel}<span class="role-more"> · ce que je peux faire</span><span class="role-q" aria-hidden="true">?</span></a>`}
       <button class="who" data-act="openMenu" aria-label="Menu du compte">
         <span class="avatar">${initial}</span><span class="who-name">${esc(S.member && S.member.name || '')}</span><span class="mono muted who-role">${roleLabel.toUpperCase()}</span>
       </button>
     </div>
   </header>
-  <main class="wrap main">${main}</main>
+  <main class="wrap main">${main}${footer()}</main>
   <nav class="tabbar" aria-label="Sections">${tabs}</nav>
   ${sheet}
   ${S.toast ? `<div class="toast" role="status">${esc(S.toast)}</div>` : ''}`;
@@ -300,7 +311,7 @@ function viewList() {
       ${isAdmin()
         ? `<p>Importe tes ${SEED.length} titres de départ (animes, mangas et séries de ta note). Les affiches se chargeront ensuite toutes seules.</p>
            <button class="btn btn-accent btn-lg" data-act="seed">Importer mes ${SEED.length} titres</button>`
-        : `<p>Nerol n’a encore rien ajouté. Tu peux déjà lui suggérer un titre.</p><a class="btn btn-ink" href="#/ajouter">Suggérer un titre</a>`}
+        : `<p>${OWNER} n’a encore rien ajouté. Tu peux déjà lui suggérer un titre.</p><a class="btn btn-ink" href="#/ajouter">Suggérer un titre</a>`}
     </section>`;
   }
 
@@ -323,7 +334,7 @@ function viewList() {
   const famCounts = Object.keys(FAMILIES).map(k => ({ k, n: inSec.filter(t => t.fam === k).length })).filter(x => x.n).sort((a, b) => b.n - a.n);
   const spectrum = famCounts.length ? `
     <div class="spectrum-wrap">
-      <div class="row-between mono muted small"><span>MON SPECTRE · clique un genre pour filtrer</span><span>Genre n°1 : ${esc(FAMILIES[famCounts[0].k].name)}</span></div>
+      <div class="row-between mono muted small"><span>${own('MON SPECTRE', 'SON SPECTRE')} · clique un genre pour filtrer</span><span>Genre n°1 : ${esc(FAMILIES[famCounts[0].k].name)}</span></div>
       <div class="spectrum">${famCounts.map(x => {
         const f = FAMILIES[x.k], on = U.fam === x.k;
         return `<button class="spec ${on ? 'on' : ''} ${U.fam && !on ? 'dim' : ''}" style="flex:${x.n} 1 0;background:${f.color};color:${f.ink}" data-act="fam" data-fam="${x.k}" aria-pressed="${on}" title="${esc(f.name)} : ${x.n}">${x.n}</button>`;
@@ -337,7 +348,7 @@ function viewList() {
     <div class="band">
       <div class="band-air">
         <span class="mono muted small">NOUVEAUX ÉPISODES CETTE SEMAINE · heure de Paris</span>
-        <div class="chips">${air.length ? air.map(a => `<a class="chip-air" href="#/titre/${encodeURIComponent(a.id)}"><b>${esc(a.title)}</b><span class="muted">${esc(a.when)}</span></a>`).join('') : `<span class="muted small">${S.airingDone ? 'Aucun de tes animes en cours n’est diffusé cette semaine.' : 'Recherche des horaires de diffusion…'}</span>`}</div>
+        <div class="chips">${air.length ? air.map(a => `<a class="chip-air" href="#/titre/${encodeURIComponent(a.id)}"><b>${esc(a.title)}</b><span class="muted">${esc(a.when)}</span></a>`).join('') : `<span class="muted small">${S.airingDone ? own('Aucun de tes animes en cours n’est diffusé cette semaine.', `Aucun des animes que ${OWNER} suit n’est diffusé cette semaine.`) : 'Recherche des horaires de diffusion…'}</span>`}</div>
       </div>
       ${pickBox()}
     </div>` : `<div class="band">${pickBox()}</div>`;
@@ -352,17 +363,22 @@ function viewList() {
   const cards = list.map(card).join('');
 
   return `
+  ${welcomeCard()}
+  ${noticesBanner()}
   <section class="hero">
     <div class="vert" aria-hidden="true">視聴リスト</div>
     <div class="hero-text">
-      <h1 class="display">My<br>Watchlist</h1>
-      <p class="muted lead">Les animes, mangas et séries que je regarde, que j’ai finis, et ceux qui attendent leur tour. ${plural(S.titles.length, 'titre', 'titres')} au compteur.</p>
+      <span class="mono muted">LA WATCHLIST DE ${OWNER.toUpperCase()}</span>
+      <h1 class="display">Watchlist<br>de ${OWNER}</h1>
+      <p class="muted lead">${own('Les animes, mangas et séries que tu regardes, que tu as finis, et ceux qui attendent leur tour.', `Les animes, mangas et séries que ${OWNER} regarde, qu’il a finis, et ceux qui attendent leur tour.`)} ${plural(S.titles.length, 'titre', 'titres')} au compteur.</p>
     </div>
     ${stamps}
   </section>
   <nav class="sections" aria-label="Sections">${sections}</nav>
   ${coverBanner()}
+  ${favRow()}
   ${band}
+  ${activityBox()}
   ${spectrum}
   <div class="toolbar">
     <label class="search" for="q">
@@ -383,6 +399,165 @@ function viewList() {
   <p class="legend-status mono muted small">中 en cours · 積 à voir · 休 en pause · 止 abandonné · 完 terminé</p>`;
 }
 
+const own = (mine, theirs) => isAdmin() ? mine : theirs;
+
+/* Ce que chaque rôle peut faire : repris par la carte de bienvenue et la page d'aide. */
+const ROLE_CAN = {
+  reader: {
+    label: 'Lecteur',
+    can: [`Parcourir les animes, mangas et séries de ${OWNER}`, 'Voir où il en est, ses notes et ses avis', 'Dire que tu as vu un titre et lui donner ta note', 'Suivre un titre pour être prévenu quand il avance', `Suggérer un titre à ${OWNER}`, 'Voter pour les suggestions des autres membres'],
+    cannot: [`Modifier la liste de ${OWNER}`]
+  },
+  editor: {
+    label: 'Éditeur',
+    can: ['Tout ce que fait un lecteur', 'Proposer des modifications : un épisode vu, un statut, une note…'],
+    cannot: [`Modifier la liste directement : ${OWNER} valide chaque proposition avant qu’elle s’applique`]
+  },
+  admin: {
+    label: 'Admin',
+    can: ['Tout modifier', 'Valider les suggestions et les propositions', 'Inviter des membres et choisir leur rôle'],
+    cannot: []
+  }
+};
+
+function welcomeCard() {
+  if (isAdmin() || !S.welcomeOpen) return '';
+  const R = ROLE_CAN[S.role] || ROLE_CAN.reader;
+  const first = esc((S.member && S.member.name) || '');
+  return `
+    <section class="welcome" aria-label="Bienvenue">
+      <div class="row-between"><b class="h3">Bienvenue${first ? ' ' + first : ''} !</b><button class="link" data-act="closeWelcome">Fermer</button></div>
+      <p>Tu es <b>${R.label.toLowerCase()}</b> sur la watchlist de ${OWNER}.</p>
+      <div class="two">
+        <div><span class="label">TU PEUX</span><ul class="ticks">${R.can.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>
+        ${R.cannot.length ? `<div><span class="label">TU NE PEUX PAS</span><ul class="crosses">${R.cannot.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+      </div>
+      <a class="link" href="#/aide">Tout savoir dans « Comment ça marche »</a>
+    </section>`;
+}
+
+/* Décisions sur mes demandes + nouveautés des titres suivis, depuis ma dernière visite. */
+function myDecisions() {
+  const since = lsGet('mw:decisions:' + S.email, 0);
+  return S.requests.filter(r => r.by === S.email && r.status !== 'pending' && tsMillis(r.decidedAt) > since);
+}
+function followChanges() {
+  const F2 = S.follows && S.follows.titles;
+  if (!F2 || isAdmin()) return [];
+  const out = [];
+  for (const id of Object.keys(F2)) {
+    const t = S.titles.find(x => x.id === id), old = F2[id];
+    if (!t) continue;
+    const parts = [];
+    if (old.status !== t.status) parts.push(`${STATUSES[old.status]?.label || '—'} → ${STATUSES[t.status]?.label || '—'}`);
+    if (t.kind === 'manga' ? (old.chapter || 0) !== (t.chapter || 0) : ((old.season || 1) !== (t.season || 1) || (old.episode || 0) !== (t.episode || 0))) parts.push(progressText(t));
+    if (t.status === 'fini' && t.rating && old.rating !== t.rating) parts.push(`noté ${t.rating}/10`);
+    if (parts.length) out.push({ t, text: parts.join(', ') });
+  }
+  return out;
+}
+function noticesBanner() {
+  if (isAdmin()) return '';
+  const dec = myDecisions(), fol = followChanges();
+  if (!dec.length && !fol.length) return '';
+  const name = r => r.type === 'edit' ? `ta modification de ${r.titleName}` : `ta suggestion ${r.item?.title || ''}`;
+  return `
+    <section class="notices" aria-label="Nouveautés">
+      <b class="h3">Du nouveau depuis ta dernière visite</b>
+      <ul class="plain">
+        ${dec.map(r => `<li>${r.status === 'accepted' ? '✓' : '✗'} ${OWNER} a ${r.status === 'accepted' ? 'accepté' : 'refusé'} ${esc(name(r))}${r.status === 'accepted' && r.type === 'suggestion' ? ' : elle est dans sa liste « À voir »' : ''}.</li>`).join('')}
+        ${fol.map(x => `<li>◎ <a href="#/titre/${encodeURIComponent(x.t.id)}"><b>${esc(x.t.title)}</b></a> : ${esc(x.text)}</li>`).join('')}
+      </ul>
+      <button class="btn btn-ghost" data-act="ackNotices">C’est noté</button>
+    </section>`;
+}
+
+function favRow() {
+  const favs = S.titles.filter(t => t.fav).sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  if (!favs.length) return '';
+  return `
+    <section class="favs" aria-label="Coups de cœur">
+      <span class="mono muted small">${own('TES COUPS DE CŒUR', `LES COUPS DE CŒUR DE ${OWNER.toUpperCase()}`)}</span>
+      <div class="fav-row">${favs.map(t => `<a class="fav" href="#/titre/${encodeURIComponent(t.id)}">${poster(t, 'poster-sm')}<span class="small"><b>${esc(t.title)}</b>${t.rating ? ' · ' + t.rating + '/10' : ''}</span></a>`).join('')}</div>
+    </section>`;
+}
+
+function activityBox() {
+  const recent = S.history.filter(h => Date.now() - tsMillis(h.at) < 14 * 86400e3 && !/^Import/.test(h.text || '')).slice(0, 5);
+  if (!recent.length) return '';
+  return `
+    <section class="activity" aria-label="Activité récente">
+      <span class="mono muted small">RÉCEMMENT CHEZ ${OWNER.toUpperCase()}</span>
+      <ul class="plain">${recent.map(h => `<li class="row-between"><span>${esc(h.text)}</span><span class="mono muted small nowrap">${fmtAgo(h.at)}</span></li>`).join('')}</ul>
+      <a class="link" href="#/stats">Tout l’historique</a>
+    </section>`;
+}
+
+function footer() {
+  const last = Math.max(0, ...S.history.map(h => tsMillis(h.at)), ...S.titles.map(t => tsMillis(t.updatedAt)));
+  return `<footer class="site-foot mono muted small"><span>Watchlist de ${OWNER}</span>${last ? `<span>Mise à jour le ${new Date(last).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })}</span>` : ''}</footer>`;
+}
+
+function lsGet(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } }
+function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* stockage indisponible */ } }
+
+/* ------------------------------------------------------------------ pages d'aide et d'avis */
+
+function viewHelp() {
+  const row = (label, r, e, a) => `<tr><td>${label}</td><td class="center">${r}</td><td class="center">${e}</td><td class="center">${a}</td></tr>`;
+  const Y = '<span class="yes">✓</span>', N = '<span class="no">—</span>', V = '<span class="small">avec validation</span>';
+  const R = ROLE_CAN[S.role] || ROLE_CAN.reader;
+  return `
+  <section class="page narrow">
+    <div class="page-head"><span class="kanji-red" aria-hidden="true">案内</span><h1 class="display-sm">Comment ça marche</h1></div>
+    <p class="lead">Ce site est la watchlist personnelle de ${OWNER} : ses animes, mangas et séries. Il y invite quelques personnes, chacune avec un rôle.</p>
+    <div class="panel"><b>Ton rôle : ${R.label}.</b> ${R.can.length ? 'Tu peux ' + esc(R.can.map(x => x.charAt(0).toLowerCase() + x.slice(1)).join(', ')) + '.' : ''}</div>
+    <div class="table-wrap"><table class="table table-fit">
+      <thead><tr><th>CE QU’ON PEUT FAIRE</th><th class="center">LECT.</th><th class="center">ÉDIT.</th><th class="center">${OWNER.toUpperCase()}</th></tr></thead>
+      <tbody>
+        ${row('Voir la liste, les fiches, les avis et les stats', Y, Y, Y)}
+        ${row('Dire « je l’ai vu aussi » et donner sa note', Y, Y, N)}
+        ${row('Suivre un titre (« Me prévenir »)', Y, Y, N)}
+        ${row('Suggérer un titre', Y, Y, Y)}
+        ${row('Voter pour une suggestion', Y, Y, Y)}
+        ${row('Changer un statut, un épisode, une note', N, V, Y)}
+        ${row('Valider les suggestions et propositions', N, N, Y)}
+        ${row('Inviter des membres', N, N, Y)}
+      </tbody>
+    </table></div>
+    <h2 class="h3">Le trajet d’une suggestion</h2>
+    <ol class="steps">
+      <li><b>Tu proposes</b> un titre depuis « Suggérer », avec un mot pour dire pourquoi.</li>
+      <li><b>Les autres membres votent</b> pour les suggestions qu’ils soutiennent.</li>
+      <li><b>${OWNER} décide.</b> Acceptée, la suggestion entre dans sa liste « À voir ».</li>
+      <li><b>Tu es prévenu</b> à ta prochaine visite, en haut de la liste.</li>
+    </ol>
+    <h2 class="h3">Les petits signes</h2>
+    <p>Chaque affiche porte un tampon : 中 en cours · 積 à voir · 休 en pause · 止 abandonné · 完 terminé.</p>
+    <p>Pour changer de rôle, demande-le directement à ${OWNER}.</p>
+  </section>`;
+}
+
+function viewReviews() {
+  const k = S.ui.rkind || 'all';
+  const items = S.titles.filter(t => (t.rating || (t.review || '').trim()) && (k === 'all' || t.kind === k))
+    .sort((a, b) => (b.rating || 0) - (a.rating || 0) || (a.title || '').localeCompare(b.title || '', 'fr'));
+  const tabs = [['all', 'Tout'], ...Object.keys(KINDS).map(x => [x, KINDS[x].label])]
+    .map(([v, l]) => `<button class="seg ${k === v ? 'on' : ''}" data-act="rkind" data-k="${v}">${l}</button>`).join('');
+  return `
+  <section class="page">
+    <div class="page-head"><span class="kanji-red" aria-hidden="true">評価</span><h1 class="display-sm">${own('Mes avis', `Les avis de ${OWNER}`)}</h1><span class="mono muted">${plural(items.length, 'titre noté ou commenté', 'titres notés ou commentés')}</span></div>
+    <div class="segs" role="group" aria-label="Type">${tabs}</div>
+    ${items.length ? `<div class="reviews">${items.map(t => `
+      <a class="review" href="#/titre/${encodeURIComponent(t.id)}">
+        <span class="review-poster">${poster(t, 'poster-sm')}</span>
+        <span class="review-text"><b class="h3">${esc(t.title)}</b><span class="muted small">${esc(KINDS[t.kind]?.one || '')} · ${esc(t.genre || famOf(t).name)}</span>${(t.review || '').trim() ? `<span>« ${esc(t.review.trim())} »</span>` : ''}</span>
+        <span class="review-score">${t.rating ? `<b>${t.rating}</b><small>/10</small>` : '<small>pas de note</small>'}</span>
+      </a>`).join('')}</div>`
+      : `<div class="empty"><span class="kanji-big" aria-hidden="true">無</span><p>${own('Tu n’as encore noté aucun titre. Note-les depuis leur fiche.', `${OWNER} n’a encore noté aucun titre ici.`)}</p></div>`}
+  </section>`;
+}
+
 function coverBanner() {
   const missing = S.titles.filter(t => !coverOf(t));
   if (S.meta.busy) {
@@ -401,8 +576,8 @@ function pickBox() {
   const p = S.ui.pick && S.titles.find(t => t.id === S.ui.pick);
   return `
     <div class="band-pick">
-      <span class="mono muted small">JE REGARDE QUOI CE SOIR ?</span>
-      ${p ? `<a class="pick-title" href="#/titre/${encodeURIComponent(p.id)}">${esc(p.title)}</a><span class="muted small">${esc(p.genre || famOf(p).name)} · tiré parmi tes À voir</span>` : `<span class="muted small">Un titre au hasard parmi tes « À voir »${S.ui.fam ? ', dans le genre choisi' : ''}.</span>`}
+      <span class="mono muted small">${own('JE REGARDE QUOI CE SOIR ?', 'UNE IDÉE POUR CE SOIR ?')}</span>
+      ${p ? `<a class="pick-title" href="#/titre/${encodeURIComponent(p.id)}">${esc(p.title)}</a><span class="muted small">${esc(p.genre || famOf(p).name)} · tiré parmi ${own('tes', 'ses')} À voir</span>` : `<span class="muted small">Un titre au hasard parmi ${own('tes', `les`)} « À voir »${own('', ` de ${OWNER}`)}${S.ui.fam ? ', dans le genre choisi' : ''}.</span>`}
       <button class="btn btn-ink" data-act="roll">${p ? 'Relancer' : 'Tirer au sort'}</button>
     </div>`;
 }
@@ -441,7 +616,7 @@ function card(t) {
     foot = `
       ${pct !== null ? `<span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>` : ''}
       <span class="prog-row"><span class="mono">${esc(progressText(t))}</span>
-      ${canPlus ? `<button class="plus" data-act="plus" data-id="${esc(t.id)}" aria-label="Ajouter un ${t.kind === 'manga' ? 'chapitre' : 'épisode'} à ${esc(t.title)}">+1</button>` : ''}</span>`;
+      ${canPlus ? `<button class="plus" data-act="plus" data-id="${esc(t.id)}" aria-label="${isAdmin() ? 'Ajouter' : 'Proposer à ' + OWNER + ' d’ajouter'} un ${t.kind === 'manga' ? 'chapitre' : 'épisode'} à ${esc(t.title)}">${isAdmin() ? '+1' : 'Proposer +1'}</button>` : ''}</span>`;
   } else if (t.status === 'fini') {
     foot = `<span class="mono">${t.rating ? t.rating + ' / 10' : '— / 10'}</span>`;
   } else {
@@ -451,7 +626,7 @@ function card(t) {
     <article class="card">
       <a class="card-link" href="#/titre/${encodeURIComponent(t.id)}" aria-label="${esc(t.title)}, ${st.label}">${poster(t)}</a>
       <div class="card-meta">
-        <span class="card-title">${esc(t.title)}</span>
+        <span class="card-title">${t.fav ? '<span class="fav-star" title="Coup de cœur">★</span> ' : ''}${esc(t.title)}</span>
         <span class="muted small">${esc(t.genre || famOf(t).name)}</span>
         ${foot}
       </div>
@@ -514,7 +689,7 @@ function viewTitle(id) {
   const { changes } = diffDraft(t);
   const dirty = Object.keys(changes).length > 0;
   const saveLabel = isAdmin() ? 'Enregistrer' : isEditor() ? 'Proposer la modification' : '';
-  const saveHint = isAdmin() ? 'Le changement s’applique tout de suite.' : isEditor() ? 'Nerol valide avant que ça change.' : 'Tu peux consulter cette fiche. Pour proposer un titre, passe par « Suggérer ».';
+  const saveHint = isAdmin() ? 'Le changement s’applique tout de suite.' : isEditor() ? `${OWNER} valide avant que ça change.` : '';
 
   const mine = S.requests.filter(r => r.type === 'edit' && r.titleId === t.id && r.status === 'pending');
 
@@ -537,6 +712,8 @@ function viewTitle(id) {
     </div>
 
     <div class="fiche-body">
+      ${ro ? `<p class="note">Fiche de ${OWNER}, en lecture seule. Plus bas, tu peux dire si tu l’as vu aussi, lui donner ta note, ou le suivre.</p>` : ''}
+      ${isEditor() && !isAdmin() ? `<p class="note">Tes changements ici sont des propositions : ${OWNER} les valide avant qu’ils s’appliquent.</p>` : ''}
       ${mine.length ? `<p class="note">${plural(mine.length, 'modification proposée', 'modifications proposées')} en attente de validation.</p>` : ''}
       <div class="block">
         <span class="label">STATUT</span>
@@ -544,7 +721,7 @@ function viewTitle(id) {
       </div>
 
       <div class="block">
-        <span class="label">OÙ J’EN SUIS</span>
+        <span class="label">${own('OÙ J’EN SUIS', `OÙ EN EST ${OWNER.toUpperCase()}`)}</span>
         <div class="steppers">
           ${manga ? stepper('chapter', 'Chapitre', 0) : stepper('season', 'Saison', 1) + stepper('episode', 'Épisode', 0)}
         </div>
@@ -556,19 +733,19 @@ function viewTitle(id) {
       </div>
 
       <div class="block">
-        <span class="label">MA NOTE · ${d.rating ? d.rating + ' / 10' : 'pas encore notée'}</span>
+        <span class="label">${own('MA NOTE', `NOTE DE ${OWNER.toUpperCase()}`)} · ${d.rating ? d.rating + ' / 10' : 'pas encore notée'}</span>
         <div class="notes">${notes}</div>
       </div>
 
       <div class="block">
-        <label class="label" for="d-review">MON AVIS</label>
+        <label class="label" for="d-review">${own('MON AVIS', `AVIS DE ${OWNER.toUpperCase()}`)}</label>
         <textarea id="d-review" rows="3" maxlength="1000" placeholder="${ro ? 'Pas encore d’avis.' : 'Deux lignes pour toi-même dans six mois…'}" data-in="draft" data-field="review" ${ro ? 'readonly' : ''}>${esc(d.review)}</textarea>
       </div>
 
-      <div class="two">
+      ${ro && !d.startedAt && !d.finishedAt ? '' : `<div class="two">
         <div class="field"><label class="label" for="d-startedAt">COMMENCÉ</label><input id="d-startedAt" type="date" value="${esc(d.startedAt)}" data-in="draft" data-field="startedAt" ${ro ? 'readonly' : ''}></div>
         <div class="field"><label class="label" for="d-finishedAt">TERMINÉ</label><input id="d-finishedAt" type="date" value="${esc(d.finishedAt)}" data-in="draft" data-field="finishedAt" ${ro ? 'readonly' : ''}></div>
-      </div>
+      </div>`}
 
       ${isEditor() ? `
       <div class="two">
@@ -580,10 +757,13 @@ function viewTitle(id) {
       ${saveLabel ? `<button class="btn btn-ink btn-lg" data-act="saveTitle" data-id="${esc(t.id)}" ${dirty ? '' : 'disabled'}>${saveLabel}</button>` : ''}
       <p class="muted small center">${dirty || !saveLabel ? saveHint : 'Aucun changement à enregistrer.'}</p>
 
+      ${membersBlock(t)}
+
       ${isAdmin() ? `
       <div class="block admin-zone">
         <span class="label">ADMIN</span>
         <div class="chips">
+          <button class="btn ${t.fav ? 'btn-accent' : 'btn-ghost'}" data-act="toggleFav" data-id="${esc(t.id)}" aria-pressed="${!!t.fav}">${t.fav ? '★ Coup de cœur' : '☆ Marquer comme coup de cœur'}</button>
           <button class="btn btn-ghost" data-act="toggleFix">${S.fix.open ? 'Fermer' : 'Corriger l’affiche et les infos'}</button>
           ${S.ui.confirm === 'del:' + t.id
             ? `<button class="btn btn-danger" data-act="deleteTitle" data-id="${esc(t.id)}">Confirmer la suppression</button><button class="link" data-act="cancelConfirm">Annuler</button>`
@@ -593,6 +773,48 @@ function viewTitle(id) {
       </div>` : ''}
     </div>
   </section>`;
+}
+
+/* « Je l'ai vu aussi », notes des membres et suivi d'un titre. */
+function membersBlock(t) {
+  if (S.seen[t.id] === undefined) loadSeen(t.id);
+  const list = S.seen[t.id] || [];
+  const rated = list.filter(x => x.rating);
+  const avg = rated.length ? (rated.reduce((a, x) => a + x.rating, 0) / rated.length).toFixed(1).replace('.', ',') : null;
+  const summary = list.length
+    ? `Vu aussi par ${plural(list.length, 'membre', 'membres')}${avg ? ` · ${avg}/10 en moyenne` : ''} : ${list.map(x => esc(x.name || x.id.split('@')[0]) + (x.rating ? ` (${x.rating})` : '')).join(', ')}.`
+    : 'Aucun membre ne l’a encore marqué comme vu.';
+  if (isAdmin()) {
+    return `<div class="block member-zone"><span class="label">LES MEMBRES</span><p class="small">${summary}</p></div>`;
+  }
+  const me = list.find(x => x.id === S.email);
+  const following = !!(S.follows && S.follows.titles && S.follows.titles[t.id]);
+  const notes = Array.from({ length: 10 }, (_, i) => i + 1).map(v =>
+    `<button class="note-btn ${me && me.rating >= v ? 'on' : ''}" data-act="seenRate" data-id="${esc(t.id)}" data-v="${v}" aria-label="Ma note : ${v} sur 10">${v}</button>`).join('');
+  return `
+    <div class="block member-zone">
+      <span class="label">ET TOI ?</span>
+      <p class="small muted">${summary}</p>
+      <div class="chips">
+        <button class="btn ${me ? 'btn-accent' : 'btn-ghost'}" data-act="toggleSeen" data-id="${esc(t.id)}" aria-pressed="${!!me}">${me ? '✓ Je l’ai vu' : 'Je l’ai vu aussi'}</button>
+        <button class="btn ${following ? 'btn-ink' : 'btn-ghost'}" data-act="toggleFollow" data-id="${esc(t.id)}" aria-pressed="${following}">${following ? '◎ Tu suis ce titre' : 'Me prévenir quand ça avance'}</button>
+      </div>
+      ${me ? `<span class="label">MA NOTE</span><div class="notes">${notes}</div>` : ''}
+      ${following ? `<p class="small muted">Tu verras en haut de la liste quand ${OWNER} change son statut, sa progression ou sa note.</p>` : ''}
+    </div>`;
+}
+
+async function loadSeen(id) {
+  S.seen[id] = S.seen[id] || null; // évite de lancer deux chargements
+  try {
+    const snap = await F.getDocs(F.collection(F.db, 'titles', id, 'seen'));
+    S.seen[id] = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  } catch (e) { S.seen[id] = []; }
+  scheduleRender();
+}
+
+function followSnapshot(t) {
+  return { status: t.status || '', season: t.season || 1, episode: t.episode || 0, chapter: t.chapter || 0, rating: t.rating || null };
 }
 
 function fixPanel(t) {
@@ -753,7 +975,8 @@ function viewMembers() {
     const action = self || m.role === 'admin' ? '' : S.ui.confirm === 'rm:' + m.id
       ? `<button class="btn btn-danger" data-act="removeMember" data-id="${esc(m.id)}">Confirmer</button> <button class="link" data-act="cancelConfirm">Annuler</button>`
       : `<button class="link danger-text" data-act="askConfirm" data-key="rm:${esc(m.id)}">Retirer</button>`;
-    return `<tr><td><b>${esc(m.id)}</b>${m.name ? `<br><span class="muted small">${esc(m.name)}</span>` : ''}</td><td>${roleCell}</td><td class="muted small">${m.addedAt ? 'Ajouté le ' + new Date(tsMillis(m.addedAt)).toLocaleDateString('fr-FR') : ''}</td><td class="right">${action}</td></tr>`;
+    const invite = self || m.role === 'admin' ? '' : `<button class="link" data-act="showInvite" data-id="${esc(m.id)}">Invitation</button> `;
+    return `<tr><td><b>${esc(m.id)}</b>${m.name ? `<br><span class="muted small">${esc(m.name)}</span>` : ''}</td><td>${roleCell}</td><td class="muted small">${m.addedAt ? 'Ajouté le ' + new Date(tsMillis(m.addedAt)).toLocaleDateString('fr-FR') : ''}</td><td class="right nowrap">${invite}${action}</td></tr>`;
   }).join('');
 
   return `
@@ -772,14 +995,23 @@ function viewMembers() {
       </div>
       <span class="muted small">${esc(N.msg || 'La personne crée son mot de passe à sa première visite, puis vérifie son email.')}</span>
     </form>
+    ${N.invite ? `
+    <div class="panel stack invite">
+      <div class="row-between"><b>Message d’invitation pour ${esc(N.invite)}</b><button class="link" data-act="hideInvite">Fermer</button></div>
+      <textarea id="invite-text" rows="9" readonly>${esc(inviteText(N.invite))}</textarea>
+      <div class="chips"><button class="btn btn-ink" data-act="copyInvite">Copier le message</button><span class="muted small">Colle-le dans WhatsApp, un SMS ou un email : le site n’envoie rien tout seul.</span></div>
+    </div>` : ''}
     <div class="table-wrap"><table class="table">
       <thead><tr><th>EMAIL</th><th>RÔLE</th><th>AJOUT</th><th class="right">ACTION</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     <div class="two muted small">
-      <p><b>Lecteur</b> : voit la liste, suggère des titres, vote pour les suggestions.</p>
+      <p><b>Lecteur</b> : voit la liste, marque ce qu’il a vu, suit des titres, suggère et vote.</p>
       <p><b>Éditeur</b> : tout ce que fait un lecteur, et propose des modifications que tu valides.</p>
     </div>
+    ${S.adminLog.length ? `
+    <h2 class="h3">Journal des membres</h2>
+    <ul class="plain small">${S.adminLog.slice(0, 20).map(l => `<li class="row-between"><span>${esc(l.text)}</span><span class="mono muted nowrap">${fmtWhen(l.at)}</span></li>`).join('')}</ul>` : ''}
   </section>`;
 }
 
@@ -845,6 +1077,7 @@ F.onAuthStateChanged(F.auth, async user => {
   stopListeners();
   S.user = user; S.member = null; S.role = null; S.titles = []; S.titlesReady = false;
   S.requests = []; S.members = []; S.access = []; S.history = []; S.airing = []; S.airingDone = false;
+  S.adminLog = []; S.seen = {}; S.follows = null; S.welcomeOpen = false;
   S.login.err = ''; S.login.busy = false;
   if (!user) { S.phase = 'login'; return render(); }
   S.email = (user.email || '').toLowerCase();
@@ -858,6 +1091,7 @@ async function loadMember() {
     const snap = await F.getDoc(F.doc(F.db, 'members', S.email));
     if (snap.exists()) {
       S.member = snap.data(); S.role = S.member.role; S.phase = 'app';
+      S.welcomeOpen = S.role !== 'admin' && !lsGet('mw:welcome:' + S.email, false);
       startListeners();
     } else {
       S.phase = 'denied'; await loadMyAccess();
@@ -904,6 +1138,14 @@ function startListeners() {
       S.access = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       render();
     }, onListenErr));
+    S.unsub.push(F.onSnapshot(F.query(F.collection(F.db, 'adminLog'), F.orderBy('at', 'desc'), F.limit(50)), snap => {
+      S.adminLog = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      render();
+    }, onListenErr));
+  } else {
+    F.getDoc(F.doc(F.db, 'follows', S.email))
+      .then(d => { S.follows = d.exists() ? d.data() : { titles: {} }; render(); })
+      .catch(() => { S.follows = { titles: {} }; });
   }
 }
 
@@ -1013,6 +1255,22 @@ function refreshVotes() {
 
 /* ------------------------------------------------------------------ écritures */
 
+// Journal réservé à l'admin (membres, accès) : jamais montré aux autres membres.
+function adminLogEntry(batch, text) {
+  batch.set(F.doc(F.collection(F.db, 'adminLog')), { at: F.serverTimestamp(), by: S.email, text });
+}
+
+function inviteText(email) {
+  return `Salut ! Je t’ai ouvert l’accès à ma watchlist (animes, mangas et séries).
+
+1. Va sur ${SITE_URL}
+2. Choisis « Première visite » et utilise cet email : ${email}
+3. Crée ton mot de passe, puis clique sur le lien de vérification reçu par email.
+
+Tu pourras voir ma liste, noter ce que tu as vu aussi et me suggérer des titres.
+${OWNER}`;
+}
+
 function historyEntry(batch, text) {
   batch.set(F.doc(F.collection(F.db, 'history')), {
     at: F.serverTimestamp(), by: S.email, byName: (S.member && S.member.name) || S.email, text
@@ -1106,7 +1364,7 @@ const ACT = {
           type: 'edit', by: S.email, byName: (S.member && S.member.name) || S.email, status: 'pending', createdAt: F.serverTimestamp(),
           titleId: t.id, titleName: t.title, changes: { [field]: after }, before: { [field]: before }
         });
-        toast(`Proposé à Nerol : ${t.title} ${field === 'chapter' ? 'chap.' : 'ép.'} ${after}`);
+        toast(`Proposé à ${OWNER} : ${t.title} ${field === 'chapter' ? 'chap.' : 'ép.'} ${after}`);
       }
     } catch (e) { toast(errText(e)); }
   },
@@ -1145,6 +1403,74 @@ const ACT = {
     resolveMeta();
   },
 
+  closeWelcome: () => { S.welcomeOpen = false; lsSet('mw:welcome:' + S.email, true); render(); },
+  ackNotices: async () => {
+    lsSet('mw:decisions:' + S.email, Date.now());
+    if (S.follows && S.follows.titles && followChanges().length) {
+      const titles = {};
+      for (const id of Object.keys(S.follows.titles)) {
+        const t = S.titles.find(x => x.id === id);
+        if (t) titles[id] = followSnapshot(t);
+      }
+      S.follows = { titles };
+      try { await F.setDoc(F.doc(F.db, 'follows', S.email), S.follows); } catch (e) { toast(errText(e)); }
+    }
+    render();
+  },
+  rkind: el => { S.ui.rkind = el.dataset.k; render(); },
+  toggleFav: async el => {
+    const t = S.titles.find(x => x.id === el.dataset.id);
+    if (!t) return;
+    try {
+      const b = F.writeBatch(F.db);
+      b.update(F.doc(F.db, 'titles', t.id), { fav: !t.fav });
+      if (!t.fav) historyEntry(b, `${t.title} rejoint les coups de cœur`);
+      await b.commit();
+    } catch (e) { toast(errText(e)); }
+  },
+  toggleSeen: async el => {
+    const id = el.dataset.id, list = S.seen[id] || [];
+    const me = list.find(x => x.id === S.email);
+    const ref = F.doc(F.db, 'titles', id, 'seen', S.email);
+    try {
+      if (me) { await F.deleteDoc(ref); S.seen[id] = list.filter(x => x.id !== S.email); }
+      else {
+        const row = { name: (S.member && S.member.name) || S.email.split('@')[0], rating: null, at: F.serverTimestamp() };
+        await F.setDoc(ref, row);
+        S.seen[id] = list.concat([{ id: S.email, ...row }]);
+      }
+      render();
+    } catch (e) { toast(errText(e)); }
+  },
+  seenRate: async el => {
+    const id = el.dataset.id, v = +el.dataset.v, list = S.seen[id] || [];
+    const me = list.find(x => x.id === S.email);
+    if (!me) return;
+    const rating = me.rating === v ? null : v;
+    try {
+      await F.setDoc(F.doc(F.db, 'titles', id, 'seen', S.email), { name: me.name, rating, at: F.serverTimestamp() });
+      me.rating = rating; render();
+    } catch (e) { toast(errText(e)); }
+  },
+  toggleFollow: async el => {
+    const id = el.dataset.id, t = S.titles.find(x => x.id === id);
+    if (!t) return;
+    const titles = Object.assign({}, (S.follows && S.follows.titles) || {});
+    if (titles[id]) delete titles[id]; else titles[id] = followSnapshot(t);
+    const before = S.follows;
+    S.follows = { titles };
+    render();
+    try { await F.setDoc(F.doc(F.db, 'follows', S.email), S.follows); toast(titles[id] ? `Tu seras prévenu quand ${t.title} avance.` : `Tu ne suis plus ${t.title}.`); }
+    catch (e) { S.follows = before; render(); toast(errText(e)); }
+  },
+  showInvite: el => { S.newMember.invite = el.dataset.id; S.newMember.msg = ''; render(); },
+  hideInvite: () => { S.newMember.invite = ''; render(); },
+  copyInvite: async () => {
+    const text = inviteText(S.newMember.invite);
+    try { await navigator.clipboard.writeText(text); toast('Message copié.'); }
+    catch (e) { const ta = document.getElementById('invite-text'); if (ta) { ta.focus(); ta.select(); } toast('Sélectionné : fais Copier.'); }
+  },
+
   /* fiche */
   dStatus: el => {
     const s = el.dataset.status, d = S.draft;
@@ -1180,7 +1506,7 @@ const ACT = {
           titleId: t.id, titleName: t.title, changes, before
         });
         S.draft = null;
-        toast('Modification envoyée à Nerol.');
+        toast(`Modification envoyée à ${OWNER}.`);
       }
     } catch (e) { el.disabled = false; toast(errText(e)); }
   },
@@ -1245,7 +1571,7 @@ const ACT = {
         type: 'suggestion', by: S.email, byName: (S.member && S.member.name) || S.email, status: 'pending',
         createdAt: F.serverTimestamp(), item: clean, note: S.add.note.trim()
       });
-      toast(`${item.title} envoyé à Nerol.`);
+      toast(`${item.title} envoyé à ${OWNER}.`);
       Object.assign(S.add, { q: '', results: [], chosen: null, note: '' });
       render();
     } catch (e) { el.disabled = false; toast(errText(e)); }
@@ -1299,7 +1625,7 @@ const ACT = {
       const b = F.writeBatch(F.db);
       b.set(F.doc(F.db, 'members', a.id), { role: 'reader', name: a.id.split('@')[0], addedAt: F.serverTimestamp() });
       b.delete(F.doc(F.db, 'accessRequests', a.id));
-      historyEntry(b, `${a.id} ajouté comme lecteur`);
+      adminLogEntry(b, `${a.id} ajouté comme lecteur`);
       await b.commit();
       toast(`${a.id} peut maintenant entrer.`);
     } catch (e) { toast(errText(e)); }
@@ -1317,7 +1643,7 @@ const ACT = {
     try {
       const b = F.writeBatch(F.db);
       b.update(F.doc(F.db, 'members', id), { role });
-      historyEntry(b, `${id} passe ${role === 'editor' ? 'éditeur' : 'lecteur'}`);
+      adminLogEntry(b, `${id} passe ${role === 'editor' ? 'éditeur' : 'lecteur'}`);
       await b.commit();
     } catch (e) { toast(errText(e)); }
   },
@@ -1326,7 +1652,7 @@ const ACT = {
     try {
       const b = F.writeBatch(F.db);
       b.delete(F.doc(F.db, 'members', id));
-      historyEntry(b, `${id} retiré des membres`);
+      adminLogEntry(b, `${id} retiré des membres`);
       await b.commit();
       S.ui.confirm = null;
       toast(`${id} n’a plus accès.`);
@@ -1381,9 +1707,9 @@ const SUBMIT = {
     const b = F.writeBatch(F.db);
     b.set(F.doc(F.db, 'members', email), { role: S.newMember.role, name: email.split('@')[0], addedAt: F.serverTimestamp() });
     if (S.access.some(a => a.id === email)) b.delete(F.doc(F.db, 'accessRequests', email));
-    historyEntry(b, `${email} ajouté comme ${S.newMember.role === 'editor' ? 'éditeur' : 'lecteur'}`);
+    adminLogEntry(b, `${email} ajouté comme ${S.newMember.role === 'editor' ? 'éditeur' : 'lecteur'}`);
     await b.commit();
-    S.newMember = { email: '', role: S.newMember.role, msg: `${email} peut maintenant créer son mot de passe sur cette page.` };
+    S.newMember = { email: '', role: S.newMember.role, msg: `${email} a accès. Envoie-lui le message ci-dessous pour le prévenir.`, invite: email };
   }
 };
 

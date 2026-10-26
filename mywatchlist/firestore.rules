@@ -25,6 +25,22 @@ service cloud.firestore {
     match /titles/{id} {
       allow read: if isMember();
       allow write: if isAdmin();
+
+      // « Je l'ai vu aussi » : un document par membre, que lui seul modifie
+      match /seen/{email} {
+        allow read: if isMember();
+        allow write: if isMember() && email == me();
+      }
+    }
+
+    // Titres suivis (« Me prévenir ») : privés à chaque membre
+    match /follows/{email} {
+      allow read, write: if isMember() && email == me();
+    }
+
+    // Journal des membres et des accès : réservé à l'admin
+    match /adminLog/{id} {
+      allow read, create: if isAdmin();
     }
 
     // Suggestions (lecteurs) et modifications proposées (éditeurs), à valider
