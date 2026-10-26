@@ -1,0 +1,62 @@
+rules_version = '2';
+// Règles de sécurité Firestore de /mywatchlist.
+// À coller dans la console Firebase : Firestore Database → Règles → Publier.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Connecté avec un email vérifié
+    function signedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function me() { return request.auth.token.email.lower(); }
+    function memberPath() { return /databases/$(database)/documents/members/$(me()); }
+    function isMember() { return signedIn() && exists(memberPath()); }
+    function role() { return get(memberPath()).data.role; }
+    function isAdmin() { return isMember() && role() == 'admin'; }
+    function isEditor() { return isMember() && role() in ['admin', 'editor']; }
+
+    // Membres : toi seul gères la liste, chacun voit sa propre fiche
+    match /members/{email} {
+      allow read: if isAdmin() || (signedIn() && email == me());
+      allow write: if isAdmin();
+    }
+
+    // Ta liste : lue par les membres, modifiée par toi seul
+    match /titles/{id} {
+      allow read: if isMember();
+      allow write: if isAdmin();
+    }
+
+    // Suggestions (lecteurs) et modifications proposées (éditeurs), à valider
+    match /requests/{id} {
+      allow read: if isMember();
+      allow create: if isMember()
+        && request.resource.data.by == me()
+        && request.resource.data.status == 'pending'
+        && (request.resource.data.type == 'suggestion'
+            || (request.resource.data.type == 'edit' && isEditor()));
+      allow update: if isAdmin();
+      allow delete: if isAdmin()
+        || (isMember() && resource.data.by == me() && resource.data.status == 'pending');
+
+      // Votes : un document par votant
+      match /votes/{voter} {
+        allow read: if isMember();
+        allow create, delete: if isMember() && voter == me();
+      }
+    }
+
+    // Historique : écrit par l'espace admin
+    match /history/{id} {
+      allow read: if isMember();
+      allow create: if isAdmin();
+    }
+
+    // Demandes d'accès : n'importe quel compte vérifié peut demander
+    match /accessRequests/{email} {
+      allow create: if signedIn() && email == me();
+      allow read: if isAdmin() || (signedIn() && email == me());
+      allow delete: if isAdmin();
+    }
+  }
+}
