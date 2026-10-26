@@ -1,6 +1,6 @@
 // Service worker minimal : rend la page installable et l'ouvre hors connexion.
 // Réseau d'abord pour nos propres fichiers, cache en secours. Firebase et les API ne passent jamais par ici.
-const CACHE = 'mywatchlist-v1';
+const CACHE = 'mywatchlist-v2';
 const SHELL = ['./', './index.html', './css/style.css', './js/app.js', './js/config.js', './js/data.js', './js/external.js', './js/firebase.js', './manifest.webmanifest', './icons/icon-192.png'];
 
 self.addEventListener('install', e => {

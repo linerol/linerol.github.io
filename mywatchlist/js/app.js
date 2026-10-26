@@ -1,6 +1,6 @@
 import * as F from './firebase.js';
 import { FAMILIES, STATUSES, STATUS_ORDER, KINDS, SEED, familyFromGenres } from './data.js';
-import { searchTitles, animeDetails, nextAiring } from './external.js';
+import { searchTitles, upcomingEpisodes } from './external.js';
 import { SITE_URL } from './config.js';
 
 /* ------------------------------------------------------------------ état */
@@ -336,7 +336,7 @@ function viewList() {
   const band = U.section === 'anime' ? `
     <div class="band">
       <div class="band-air">
-        <span class="mono muted small">NOUVEAUX ÉPISODES CETTE SEMAINE</span>
+        <span class="mono muted small">NOUVEAUX ÉPISODES CETTE SEMAINE · heure de Paris</span>
         <div class="chips">${air.length ? air.map(a => `<a class="chip-air" href="#/titre/${encodeURIComponent(a.id)}"><b>${esc(a.title)}</b><span class="muted">${esc(a.when)}</span></a>`).join('') : `<span class="muted small">${S.airingDone ? 'Aucun de tes animes en cours n’est diffusé cette semaine.' : 'Recherche des horaires de diffusion…'}</span>`}</div>
       </div>
       ${pickBox()}
@@ -361,6 +361,7 @@ function viewList() {
     ${stamps}
   </section>
   <nav class="sections" aria-label="Sections">${sections}</nav>
+  ${coverBanner()}
   ${band}
   ${spectrum}
   <div class="toolbar">
@@ -380,6 +381,20 @@ function viewList() {
     <div class="empty"><span class="kanji-big" aria-hidden="true">無</span><p>Aucun titre ne correspond.</p>${hasFilter ? `<button class="btn btn-ghost" data-act="resetFilters">Effacer les filtres</button>` : ''}</div>`}
   ${S.ui.sheet === 'filters' ? filtersSheet(famCounts) : ''}
   <p class="legend-status mono muted small">中 en cours · 積 à voir · 休 en pause · 止 abandonné · 完 terminé</p>`;
+}
+
+function coverBanner() {
+  const missing = S.titles.filter(t => !coverOf(t));
+  if (S.meta.busy) {
+    return `<p class="note" role="status">Recherche des affiches… ${S.meta.done} / ${S.meta.todo}${S.meta.err ? ` · nouvelle tentative (${esc(S.meta.err)})` : ''}</p>`;
+  }
+  if (!missing.length) return '';
+  if (!isAdmin()) return S.meta.err ? `<p class="alert" role="alert">Affiches indisponibles : ${esc(S.meta.err)}</p>` : '';
+  return `
+    <div class="${S.meta.err ? 'alert' : 'note'} row-between" role="status">
+      <span>${S.meta.err ? `La recherche des affiches a échoué : ${esc(S.meta.err)}` : `${plural(missing.length, 'titre n’a pas encore d’affiche', 'titres n’ont pas encore d’affiche')}.`}</span>
+      <button class="btn btn-ink" data-act="retryCovers">Rechercher les affiches</button>
+    </div>`;
 }
 
 function pickBox() {
@@ -513,7 +528,8 @@ function viewTitle(id) {
           <span class="mono small">${esc(KINDS[t.kind].one.toUpperCase())} · ${esc((t.genre || f.name).toUpperCase())}</span>
           <h1 class="fiche-title">${esc(t.title)}</h1>
           <span class="small">${[m.year, m.altTitle && m.altTitle !== t.title ? m.altTitle : '', m.duration ? m.duration + ' min / ép.' : ''].filter(Boolean).map(esc).join(' · ')}</span>
-          ${m.source === 'mal' && m.extId ? `<a class="small ext" href="https://myanimelist.net/${t.kind === 'manga' ? 'manga' : 'anime'}/${esc(m.extId)}" target="_blank" rel="noopener">Voir sur MyAnimeList ↗</a>` : ''}
+          ${m.source === 'anilist' && m.extId ? `<a class="small ext" href="https://anilist.co/${t.kind === 'manga' ? 'manga' : 'anime'}/${esc(m.extId)}" target="_blank" rel="noopener">Voir sur AniList ↗</a>` : ''}
+          ${(m.source === 'mal' ? m.extId : m.malId) ? `<a class="small ext" href="https://myanimelist.net/${t.kind === 'manga' ? 'manga' : 'anime'}/${esc(m.source === 'mal' ? m.extId : m.malId)}" target="_blank" rel="noopener">Voir sur MyAnimeList ↗</a>` : ''}
           ${m.source === 'tvmaze' && m.extId ? `<a class="small ext" href="https://www.tvmaze.com/shows/${esc(m.extId)}" target="_blank" rel="noopener">Voir sur TVmaze ↗</a>` : ''}
         </div>
       </div>
@@ -584,7 +600,7 @@ function fixPanel(t) {
   return `
     <form class="stack" data-submit="fixSearch">
       <label class="search" for="fixq"><input id="fixq" type="search" value="${esc(F2.q)}" data-in="fixq" placeholder="Titre à chercher"></label>
-      <button class="btn btn-ink" ${F2.busy ? 'disabled' : ''}>${F2.busy ? 'Recherche…' : 'Chercher sur ' + (t.kind === 'serie' ? 'TVmaze' : 'MyAnimeList')}</button>
+      <button class="btn btn-ink" ${F2.busy ? 'disabled' : ''}>${F2.busy ? 'Recherche…' : 'Chercher sur ' + (t.kind === 'serie' ? 'TVmaze' : 'AniList')}</button>
     </form>
     <div class="results">${F2.results.map((r, i) => resultRow(r, i, 'fixPick', false)).join('')}</div>`;
 }
@@ -623,7 +639,7 @@ function viewAdd() {
             <input id="addq" type="search" placeholder="Chercher ${A.kind === 'serie' ? 'une série' : A.kind === 'manga' ? 'un manga' : 'un anime'}" value="${esc(A.q)}" data-in="addq" autocomplete="off">
           </label>
         </form>
-        <span class="mono muted small">${A.busy ? 'RECHERCHE…' : A.err ? esc(A.err) : A.results.length ? 'RÉSULTATS ' + (A.kind === 'serie' ? 'TVMAZE' : 'MYANIMELIST') : 'Tape au moins 2 lettres.'}</span>
+        <span class="mono muted small">${A.busy ? 'RECHERCHE…' : A.err ? esc(A.err) : A.results.length ? 'RÉSULTATS ' + (A.kind === 'serie' ? 'TVMAZE' : 'ANILIST') : 'Tape au moins 2 lettres.'}</span>
         <div class="results">${A.results.map((r, i) => resultRow(r, i, 'addPick', A.chosen === i)).join('')}</div>
         ${chosen ? `
           ${dup ? `<p class="note">« ${esc(dup.title)} » est déjà dans la liste (${esc(STATUSES[dup.status]?.label || '')}).</p>` : ''}
@@ -893,28 +909,42 @@ function startListeners() {
 
 /* ------------------------------------------------------------------ données externes en arrière-plan */
 
-const META_KEYS = ['cover', 'source', 'extId', 'total', 'duration', 'year', 'altTitle'];
+const META_KEYS = ['cover', 'source', 'extId', 'malId', 'total', 'duration', 'year', 'altTitle'];
 function metaFrom(r) { const o = {}; for (const k of META_KEYS) if (r[k] !== null && r[k] !== undefined && r[k] !== '') o[k] = r[k]; return o; }
+const META_CACHE = 'mw:meta2:';
 
-let metaBusy = false;
+// Recherche des affiches en arrière-plan. S.meta = état affiché à l'admin.
+S.meta = { busy: false, done: 0, todo: 0, err: '' };
 async function resolveMeta() {
-  if (metaBusy) return;
-  metaBusy = true;
+  if (S.meta.busy) return;
+  const pending = () => S.titles.filter(x => !x.cover && !x.metaTried && !S.localMeta[x.id]);
+  if (!pending().length) return;
+  S.meta = { busy: true, done: 0, todo: pending().length, err: '' };
+  render();
+  let failures = 0;
   try {
     for (;;) {
-      const t = S.titles.find(x => !x.cover && !x.metaTried && !S.localMeta[x.id]);
+      const t = pending()[0];
       if (!t) break;
       let found = null;
-      const key = 'mw:meta:' + t.id;
-      try { found = JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) { /* ignore */ }
+      try { found = JSON.parse(localStorage.getItem(META_CACHE + t.id) || 'null'); } catch (e) { /* ignore */ }
       if (!found) {
         try {
           const res = await searchTitles(t.kind, t.lookup || t.title, { popular: true, limit: 3 });
           found = res[0] ? metaFrom(res[0]) : { none: true };
-        } catch (e) { break; }
-        try { localStorage.setItem(key, JSON.stringify(found)); } catch (e) { /* ignore */ }
+          failures = 0;
+        } catch (e) {
+          failures++;
+          S.meta.err = e.message || String(e);
+          render();
+          if (failures >= 3) break;          // le service est en panne : on s'arrête, le bouton permet de relancer
+          await new Promise(r => setTimeout(r, 3000 * failures));
+          continue;
+        }
+        try { localStorage.setItem(META_CACHE + t.id, JSON.stringify(found)); } catch (e) { /* ignore */ }
       }
       S.localMeta[t.id] = found;
+      S.meta.done++;
       if (isAdmin()) {
         const patch = { metaTried: true };
         if (!found.none) for (const k of META_KEYS) if (found[k] !== undefined && (t[k] === undefined || t[k] === null || t[k] === '')) patch[k] = found[k];
@@ -923,7 +953,12 @@ async function resolveMeta() {
         scheduleRender();
       }
     }
-  } finally { metaBusy = false; }
+    if (failures < 3) S.meta.err = '';
+  } finally {
+    S.meta.busy = false;
+    render();
+    loadAiring();
+  }
 }
 
 let renderTimer = null;
@@ -932,26 +967,33 @@ function scheduleRender() { clearTimeout(renderTimer); renderTimer = setTimeout(
 let airingBusy = false;
 async function loadAiring() {
   if (airingBusy) return;
-  const targets = S.titles.filter(t => t.kind === 'anime' && t.status === 'cours' && metaOf(t).source === 'mal' && metaOf(t).extId);
-  const key = targets.map(t => t.id).sort().join(',');
+  const targets = S.titles.filter(t => t.kind === 'anime' && t.status === 'cours' && metaOf(t).extId && ['anilist', 'mal'].includes(metaOf(t).source));
+  const key = targets.map(t => t.id + ':' + metaOf(t).extId).sort().join(',');
   if (key === loadAiring.key) return;
   loadAiring.key = key;
   airingBusy = true;
-  const out = [];
-  for (const t of targets) {
-    try {
-      const info = await animeDetails(metaOf(t).extId);
-      if (!info.airing) continue;
-      const next = nextAiring(info.broadcast);
-      if (!next) continue;
-      out.push({ id: t.id, title: t.title, at: next.getTime(), when: next.toLocaleString('fr-FR', { weekday: 'short', hour: '2-digit', minute: '2-digit' }) });
-    } catch (e) { /* MyAnimeList indisponible */ }
-  }
-  S.airing = out.sort((a, b) => a.at - b.at);
+  try {
+    const ids = [], malIds = [];
+    for (const t of targets) {
+      const m = metaOf(t);
+      if (m.source === 'anilist') ids.push(+m.extId); else malIds.push(+m.extId);
+    }
+    const next = await upcomingEpisodes(ids, malIds);
+    const week = Date.now() + 7 * 86400e3;
+    const out = [];
+    for (const t of targets) {
+      const m = metaOf(t);
+      const n = next[(m.source === 'anilist' ? 'al:' : 'mal:') + m.extId];
+      if (!n || n.airingAt * 1000 > week) continue;
+      const d = new Date(n.airingAt * 1000);
+      out.push({ id: t.id, title: t.title, at: d.getTime(), when: `ép. ${n.episode} · ` + d.toLocaleString('fr-FR', { weekday: 'short', hour: '2-digit', minute: '2-digit' }) });
+    }
+    S.airing = out.sort((a, b) => a.at - b.at);
+  } catch (e) { /* AniList indisponible : le bandeau reste vide */ }
   S.airingDone = true;
   airingBusy = false;
   render();
-  loadAiring(); // relance si de nouveaux animes ont reçu leur identifiant pendant la recherche
+  loadAiring(); // relance si d'autres animes ont reçu leur identifiant entre-temps
 }
 
 let votesTimer = null;
@@ -982,7 +1024,7 @@ function titleFromItem(item, status) {
   return {
     title: item.title, altTitle: item.altTitle || '', kind: item.kind, status,
     genre: (item.genres || []).slice(0, 2).join(' · '), fam: familyFromGenres(item.genres || []),
-    cover: item.cover || null, source: item.source, extId: item.extId,
+    cover: item.cover || null, source: item.source, extId: item.extId, malId: item.malId || null,
     total: item.total || null, duration: item.duration || null, year: item.year || null,
     season: 1, episode: 0, chapter: 0, rating: null, review: '',
     startedAt: status === 'cours' || status === 'fini' ? today : '', finishedAt: status === 'fini' ? today : '',
@@ -1087,6 +1129,22 @@ const ACT = {
     } catch (e) { el.disabled = false; toast(errText(e)); }
   },
 
+  retryCovers: async el => {
+    el.disabled = true;
+    const missing = S.titles.filter(t => !coverOf(t));
+    for (const t of missing) {
+      delete S.localMeta[t.id];
+      try { localStorage.removeItem(META_CACHE + t.id); } catch (e) { /* ignore */ }
+    }
+    S.meta.err = '';
+    try {
+      const b = F.writeBatch(F.db);
+      for (const t of missing) if (t.metaTried) b.update(F.doc(F.db, 'titles', t.id), { metaTried: false });
+      await b.commit();
+    } catch (e) { toast(errText(e)); }
+    resolveMeta();
+  },
+
   /* fiche */
   dStatus: el => {
     const s = el.dataset.status, d = S.draft;
@@ -1152,7 +1210,7 @@ const ACT = {
       b.update(F.doc(F.db, 'titles', t.id), patch);
       historyEntry(b, `${t.title} : affiche et infos corrigées (${r.title})`);
       await b.commit();
-      try { localStorage.removeItem('mw:meta:' + t.id); } catch (e) { /* ignore */ }
+      try { localStorage.removeItem(META_CACHE + t.id); } catch (e) { /* ignore */ }
       delete S.localMeta[t.id];
       S.fix.open = false; S.draft = null;
       toast('Affiche mise à jour.');
@@ -1182,7 +1240,7 @@ const ACT = {
     if (!item) return;
     el.disabled = true;
     try {
-      const clean = { title: item.title, altTitle: item.altTitle || '', kind: item.kind, cover: item.cover || null, source: item.source, extId: item.extId, total: item.total || null, duration: item.duration || null, year: item.year || null, genres: (item.genres || []).slice(0, 6) };
+      const clean = { title: item.title, altTitle: item.altTitle || '', kind: item.kind, cover: item.cover || null, source: item.source, extId: item.extId, malId: item.malId || null, total: item.total || null, duration: item.duration || null, year: item.year || null, genres: (item.genres || []).slice(0, 6) };
       await F.addDoc(F.collection(F.db, 'requests'), {
         type: 'suggestion', by: S.email, byName: (S.member && S.member.name) || S.email, status: 'pending',
         createdAt: F.serverTimestamp(), item: clean, note: S.add.note.trim()

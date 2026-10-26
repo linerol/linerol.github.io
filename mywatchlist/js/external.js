@@ -1,113 +1,124 @@
-// Recherche et métadonnées publiques : MyAnimeList (via l'API Jikan) et TVmaze.
-// Jikan limite à ~3 requêtes/seconde : toutes ses requêtes passent par une file.
+// Recherche et métadonnées publiques : AniList (animes et mangas) et TVmaze (séries).
+// Les deux API sont gratuites, sans clé, et acceptent les appels depuis le navigateur.
 
-const JIKAN = 'https://api.jikan.moe/v4';
+const ANILIST = 'https://graphql.anilist.co';
 const TVMAZE = 'https://api.tvmaze.com';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-let jikanChain = Promise.resolve();
-function jikan(path) {
-  const run = jikanChain.then(() => fetchJson(JIKAN + path));
-  jikanChain = run.catch(() => {}).then(() => sleep(450));
+// AniList limite le nombre de requêtes par minute : tout passe par une file espacée.
+let chain = Promise.resolve();
+function queued(fn, gap = 700) {
+  const run = chain.then(fn);
+  chain = run.catch(() => {}).then(() => sleep(gap));
   return run;
+}
+
+async function anilist(query, variables, tries = 3) {
+  return queued(async () => {
+    for (let i = 0; i < tries; i++) {
+      let res;
+      try {
+        res = await fetch(ANILIST, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ query, variables })
+        });
+      } catch (e) {
+        if (i === tries - 1) throw new Error('AniList injoignable (réseau ou bloqueur de pub).');
+        await sleep(1500 * (i + 1));
+        continue;
+      }
+      if (res.status === 429) {
+        const wait = (+res.headers.get('Retry-After') || 5) * 1000;
+        await sleep(wait);
+        continue;
+      }
+      if (res.status >= 500) { await sleep(1500 * (i + 1)); continue; }
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || j.errors) throw new Error('AniList : ' + ((j.errors && j.errors[0] && j.errors[0].message) || 'HTTP ' + res.status));
+      return j.data;
+    }
+    throw new Error('AniList ne répond pas pour le moment. Réessaie dans une minute.');
+  });
 }
 
 async function fetchJson(url, tries = 3) {
   for (let i = 0; i < tries; i++) {
-    const res = await fetch(url);
-    if (res.status === 429) { await sleep(1200 * (i + 1)); continue; }
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    let res;
+    try { res = await fetch(url); }
+    catch (e) { if (i === tries - 1) throw new Error('TVmaze injoignable.'); await sleep(1500); continue; }
+    if (res.status === 429 || res.status >= 500) { await sleep(1500 * (i + 1)); continue; }
+    if (!res.ok) throw new Error('TVmaze : HTTP ' + res.status);
     return res.json();
   }
-  throw new Error('Service saturé, réessaie dans une minute.');
+  throw new Error('TVmaze ne répond pas pour le moment.');
 }
 
-function parseDuration(text) {
-  // "24 min per ep", "1 hr 2 min" → minutes
-  if (!text) return null;
-  const h = /(\d+)\s*hr/.exec(text), m = /(\d+)\s*min/.exec(text);
-  const total = (h ? +h[1] * 60 : 0) + (m ? +m[1] : 0);
-  return total || null;
-}
+const MEDIA_FIELDS = `id idMal type format title { romaji english } coverImage { extraLarge large }
+  episodes chapters volumes duration seasonYear startDate { year } genres status
+  nextAiringEpisode { airingAt episode }`;
 
-function names(list) { return (list || []).map(g => g.name); }
+const SEARCH_Q = `query ($search: String, $type: MediaType, $perPage: Int, $sort: [MediaSort]) {
+  Page(perPage: $perPage) { media(search: $search, type: $type, sort: $sort, isAdult: false) { ${MEDIA_FIELDS} } }
+}`;
 
-function mapAnime(a) {
+function mapMedia(m) {
+  const manga = m.type === 'MANGA';
   return {
-    kind: 'anime', source: 'mal', extId: a.mal_id,
-    title: a.title_english || a.title, altTitle: a.title,
-    cover: a.images?.webp?.large_image_url || a.images?.jpg?.large_image_url || a.images?.jpg?.image_url || null,
-    total: a.episodes || null, duration: parseDuration(a.duration),
-    year: a.year || a.aired?.prop?.from?.year || null,
-    genres: names(a.genres).concat(names(a.themes), names(a.demographics)),
-    airing: !!a.airing, broadcast: a.broadcast || null
-  };
-}
-
-function mapManga(m) {
-  return {
-    kind: 'manga', source: 'mal', extId: m.mal_id,
-    title: m.title_english || m.title, altTitle: m.title,
-    cover: m.images?.webp?.large_image_url || m.images?.jpg?.large_image_url || m.images?.jpg?.image_url || null,
-    total: m.chapters || null, volumes: m.volumes || null, duration: null,
-    year: m.published?.prop?.from?.year || null,
-    genres: names(m.genres).concat(names(m.themes), names(m.demographics))
+    kind: manga ? 'manga' : 'anime', source: 'anilist', extId: m.id, malId: m.idMal || null,
+    title: (m.title && (m.title.english || m.title.romaji)) || '', altTitle: (m.title && m.title.romaji) || '',
+    cover: (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || null,
+    total: manga ? (m.chapters || null) : (m.episodes || null),
+    volumes: m.volumes || null, duration: manga ? null : (m.duration || null),
+    year: m.seasonYear || (m.startDate && m.startDate.year) || null,
+    genres: m.genres || [],
+    airing: m.status === 'RELEASING', nextAiring: m.nextAiringEpisode || null
   };
 }
 
 function mapShow(s) {
   return {
-    kind: 'serie', source: 'tvmaze', extId: s.id,
+    kind: 'serie', source: 'tvmaze', extId: s.id, malId: null,
     title: s.name, altTitle: '',
-    cover: s.image?.original || s.image?.medium || null,
+    cover: (s.image && (s.image.original || s.image.medium)) || null,
     total: null, duration: s.averageRuntime || s.runtime || null,
     year: s.premiered ? +s.premiered.slice(0, 4) : null,
     genres: s.genres || []
   };
 }
 
-/** Recherche un titre. `popular` trie par popularité (utile pour retrouver le bon titre automatiquement). */
+/** Recherche un titre. `popular` met les titres les plus suivis en tête (utile pour retrouver une œuvre automatiquement). */
 export async function searchTitles(kind, q, { popular = false, limit = 8 } = {}) {
-  const enc = encodeURIComponent(q.trim());
-  if (!enc) return [];
-  const order = popular ? '&order_by=members&sort=desc' : '';
-  if (kind === 'anime') {
-    const j = await jikan(`/anime?q=${enc}&limit=${limit}&sfw=true${order}`);
-    return (j.data || []).map(mapAnime);
+  const term = q.trim();
+  if (!term) return [];
+  if (kind === 'serie') {
+    const j = await fetchJson(`${TVMAZE}/search/shows?q=${encodeURIComponent(term)}`);
+    return (j || []).slice(0, limit).map(x => mapShow(x.show));
   }
-  if (kind === 'manga') {
-    const j = await jikan(`/manga?q=${enc}&limit=${limit}&sfw=true${order}`);
-    return (j.data || []).map(mapManga);
-  }
-  const j = await fetchJson(`${TVMAZE}/search/shows?q=${enc}`);
-  return (j || []).slice(0, limit).map(x => mapShow(x.show));
+  const data = await anilist(SEARCH_Q, {
+    search: term, type: kind === 'manga' ? 'MANGA' : 'ANIME', perPage: limit,
+    sort: popular ? ['SEARCH_MATCH', 'POPULARITY_DESC'] : ['SEARCH_MATCH']
+  });
+  return ((data && data.Page && data.Page.media) || []).map(mapMedia);
 }
 
-/** Détails d'un anime (diffusion en cours, jour et heure), mis en cache 12 h dans le navigateur. */
-export async function animeDetails(malId) {
-  const key = 'mw:anime:' + malId;
-  try {
-    const hit = JSON.parse(localStorage.getItem(key) || 'null');
-    if (hit && Date.now() - hit.at < 12 * 3600e3) return hit.data;
-  } catch (e) { /* stockage indisponible */ }
-  const j = await jikan(`/anime/${malId}`);
-  const data = mapAnime(j.data);
-  try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), data })); } catch (e) { /* ignore */ }
-  return data;
-}
-
-/** Prochaine diffusion à partir de l'horaire japonais renvoyé par MyAnimeList. */
-export function nextAiring(broadcast) {
-  if (!broadcast || !broadcast.day || !broadcast.time) return null;
-  const days = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays'];
-  const d = days.indexOf(broadcast.day);
-  if (d < 0) return null;
-  const [hh, mm] = broadcast.time.split(':').map(Number);
-  const JST = 9 * 3600e3;
-  const now = Date.now();
-  const jst = new Date(now + JST); // lu avec les getters UTC = heure de Tokyo
-  const delta = (d - jst.getUTCDay() + 7) % 7;
-  let t = Date.UTC(jst.getUTCFullYear(), jst.getUTCMonth(), jst.getUTCDate() + delta, hh, mm) - JST;
-  if (t < now - 3 * 3600e3) t += 7 * 86400e3;
-  return new Date(t);
+/**
+ * Prochains épisodes des animes en cours de diffusion, en une seule requête.
+ * `ids` : identifiants AniList ; `malIds` : identifiants MyAnimeList (titres ajoutés avant le passage à AniList).
+ * Renvoie { 'al:123': { airingAt, episode }, 'mal:456': {...} }.
+ */
+export async function upcomingEpisodes(ids, malIds) {
+  const out = {};
+  const run = async (field, list, prefix) => {
+    if (!list.length) return;
+    const q = `query ($ids: [Int]) { Page(perPage: 50) { media(${field}: $ids, type: ANIME) { id idMal nextAiringEpisode { airingAt episode } } } }`;
+    const data = await anilist(q, { ids: list.slice(0, 50) });
+    for (const m of (data && data.Page && data.Page.media) || []) {
+      if (!m.nextAiringEpisode) continue;
+      out[prefix + (prefix === 'al:' ? m.id : m.idMal)] = m.nextAiringEpisode;
+    }
+  };
+  await run('id_in', ids, 'al:');
+  await run('idMal_in', malIds, 'mal:');
+  return out;
 }
