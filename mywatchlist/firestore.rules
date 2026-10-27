@@ -41,6 +41,11 @@ service cloud.firestore {
       allow delete: if isAdmin() || (isMember() && resource.data.uid == request.auth.uid);
     }
 
+    // Corbeille : titres supprimés, gardés 30 jours, visibles par toi seul
+    match /trash/{id} {
+      allow read, write: if isAdmin();
+    }
+
     // Réglages partagés (sites de la page « Où regarder ») : lus par les membres, modifiés par toi
     match /settings/{id} {
       allow read: if isMember();

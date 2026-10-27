@@ -18,6 +18,8 @@ const S = {
   newSite: { name: '', url: '', note: '' },
   flash: {}, lastUpdated: {},  // cartes qui viennent de changer
   update: false,               // nouvelle version du site prête
+  online: navigator.onLine !== false,
+  trash: [],                   // titres supprimés (admin), gardés 30 jours
   titles: [], titlesReady: false,
   requests: [], votes: {},
   members: [], access: [], history: [],
@@ -64,6 +66,17 @@ function fmtAgo(t) {
   if (h < 24) return `il y a ${h} h`;
   const d = Math.round(h / 24);
   return d === 1 ? 'hier' : `il y a ${d} jours`;
+}
+
+/**
+ * Écriture Firestore qui ne bloque pas l'écran hors connexion : le cache local l'applique tout de suite
+ * et l'envoie au retour du réseau. Une erreur rapide (droits refusés…) remonte comme d'habitude ;
+ * une erreur tardive s'affiche en message.
+ */
+function sent(p) {
+  let late = false;
+  p.catch(e => { if (late) toast(errText(e)); });
+  return Promise.race([p, new Promise(r => setTimeout(() => { late = true; r(); }, 1500))]);
 }
 
 function toast(text) {
@@ -130,6 +143,34 @@ function progressText(t) {
   if (t.kind === 'manga') return 'Chap. ' + (t.chapter || 0) + (totalOf(t) ? ' / ' + totalOf(t) : '');
   return 'S' + (t.season || 1) + ' · ép. ' + (t.episode || 0) + (totalOf(t) ? ' / ' + totalOf(t) : '');
 }
+/** Durée lisible : 95 → « 1 h 35 », 3000 → « 2 j 2 h ». */
+function fmtDuration(min) {
+  const h = Math.floor(min / 60), m = Math.round(min % 60);
+  if (h >= 48) return `${Math.floor(h / 24)} j ${h % 24} h`;
+  if (h >= 1) return m ? `${h} h ${String(m).padStart(2, '0')}` : `${h} h`;
+  return `${m} min`;
+}
+/** Ce qu'il reste à voir d'un titre : { left, unit, minutes } ou null si on ne sait pas. */
+function remaining(t) {
+  const tot = totalOf(t);
+  if (!tot || t.kind === 'film') return null;
+  const manga = t.kind === 'manga';
+  const left = tot - (manga ? (t.chapter || 0) : (t.episode || 0));
+  if (left <= 0) return null;
+  const dur = metaOf(t).duration;
+  return { left, unit: manga ? (left > 1 ? 'chapitres' : 'chapitre') : (left > 1 ? 'épisodes' : 'épisode'), minutes: !manga && dur ? left * dur : null };
+}
+function remainingText(t) {
+  const r = remaining(t);
+  if (!r) return '';
+  return `Reste ${r.left} ${r.unit}${r.minutes ? ' · ≈ ' + fmtDuration(r.minutes) : ''}`;
+}
+function cardLeft(t) {
+  const r = remaining(t);
+  if (!r) return '';
+  const txt = r.minutes ? `≈ ${fmtDuration(r.minutes)} restantes` : `${r.left} ${t.kind === 'manga' ? 'chap.' : 'ép.'} restants`;
+  return `<span class="card-left">${txt}</span>`;
+}
 function progressPct(t) {
   const tot = totalOf(t);
   if (!tot) return null;
@@ -147,7 +188,7 @@ function route() {
   if (name === 'series') return { name: 'list', section: 'serie' };
   if (name === 'films') return { name: 'list', section: 'film' };
   if (name === 'titre' && id) return { name: 'title', id: decodeURIComponent(id) };
-  if (['ajouter', 'valider', 'membres', 'stats', 'avis', 'aide', 'profil', 'ou-regarder'].includes(name)) return { name };
+  if (['ajouter', 'valider', 'membres', 'stats', 'avis', 'aide', 'profil', 'ou-regarder', 'corbeille'].includes(name)) return { name };
   return { name: 'list' };
 }
 
@@ -182,6 +223,7 @@ function view() {
   else if (r.name === 'aide') main = viewHelp();
   else if (r.name === 'profil') main = viewProfile();
   else if (r.name === 'ou-regarder') main = viewWhere();
+  else if (r.name === 'corbeille') main = isAdmin() ? viewTrash() : viewList();
   else main = viewList();
   return shell(r, main);
 }
@@ -293,7 +335,7 @@ function shell(r, main) {
         <a href="#/" data-act="closeSheet">Liste</a>
         <a href="#/avis" data-act="closeSheet">Les avis de ${OWNER}</a>
         <a href="#/ajouter" data-act="closeSheet">${addLabel}</a>
-        ${admin ? `<a href="#/valider" data-act="closeSheet">À valider ${n ? `<span class="badge">${n}</span>` : ''}</a><a href="#/membres" data-act="closeSheet">Membres</a>` : ''}
+        ${admin ? `<a href="#/valider" data-act="closeSheet">À valider ${n ? `<span class="badge">${n}</span>` : ''}</a><a href="#/membres" data-act="closeSheet">Membres</a><a href="#/corbeille" data-act="closeSheet">Corbeille ${S.trash.length ? `<span class="mono muted">${S.trash.length}</span>` : ''}</a>` : ''}
         <a href="#/ou-regarder" data-act="closeSheet">Où regarder</a>
         <a href="#/stats" data-act="closeSheet">Stats et historique</a>
         <a href="#/profil" data-act="closeSheet">Mon profil</a>
@@ -325,6 +367,7 @@ function shell(r, main) {
   <main class="wrap main">${main}${footer()}</main>
   <nav class="tabbar" aria-label="Sections">${tabs}</nav>
   ${sheet}
+  ${S.online ? '' : `<div class="offline-bar" role="status">${pic('statut-en-pause')}<span>Hors connexion : tes changements partiront au retour du réseau.</span></div>`}
   ${S.update ? `<div class="update-bar" role="status"><span>Nouvelle version disponible</span><button class="btn btn-accent" data-act="applyUpdate">Mettre à jour</button></div>` : ''}
   ${S.toast ? `<div class="toast" role="status">${esc(S.toast)}</div>` : ''}`;
 }
@@ -395,7 +438,7 @@ function viewList() {
     <div class="band">
       <div class="band-air">
         <span class="mono muted small">NOUVEAUX ÉPISODES CETTE SEMAINE · heure de Paris</span>
-        <div class="chips">${air.length ? air.map(a => `<a class="chip-air" href="#/titre/${encodeURIComponent(a.id)}"><b>${esc(a.title)}</b><span class="muted">${esc(a.when)}</span></a>`).join('') : `<span class="muted small">${S.airingDone ? own('Aucun de tes animes en cours n’est diffusé cette semaine.', `Aucun des animes que ${OWNER} suit n’est diffusé cette semaine.`) : 'Recherche des horaires de diffusion…'}</span>`}</div>
+        ${air.length ? `<ul class="air-list">${air.map(a => `<li><a href="#/titre/${encodeURIComponent(a.id)}"><b>${esc(a.title)}</b><span class="mono muted">${esc(a.when)}</span></a></li>`).join('')}</ul>` : `<span class="muted small">${S.airingDone ? own('Aucun de tes animes en cours n’est diffusé cette semaine.', `Aucun des animes que ${OWNER} suit n’est diffusé cette semaine.`) : 'Recherche des horaires de diffusion…'}</span>`}
       </div>
       ${pickBox()}
     </div>` : `<div class="band">${pickBox()}</div>`;
@@ -437,7 +480,7 @@ function viewList() {
     <button class="btn btn-ghost" data-act="sort">Tri : ${SORTS[U.sort]}</button>
     <button class="btn btn-ghost only-mobile" data-act="openFilters">Genres${U.fam ? ' · 1' : ''}</button>
   </div>
-  <div class="segs" role="group" aria-label="Statut">${statusTabs}</div>
+  <div class="segs segs-scroll" role="group" aria-label="Statut">${statusTabs}</div>
   <div class="row-between mono muted small result">
     <span>${plural(list.length, 'titre affiché', 'titres affichés')}${U.fam ? ' · ' + esc(FAMILIES[U.fam].name) : ''}</span>
     ${hasFilter ? `<button class="link" data-act="resetFilters">Tout réafficher</button>` : ''}
@@ -558,7 +601,7 @@ function activityBox() {
   return `
     <section class="activity" aria-label="Activité récente">
       <span class="mono muted small">RÉCEMMENT CHEZ ${OWNER.toUpperCase()}</span>
-      <ul class="plain">${recent.map(h => `<li class="row-between"><span>${esc(h.text)}</span><span class="mono muted small nowrap">${fmtAgo(h.at)}</span></li>`).join('')}</ul>
+      <ul class="plain">${recent.map(h => `<li><span>${esc(h.text)}</span><span class="mono muted small">${fmtAgo(h.at)}</span></li>`).join('')}</ul>
       <a class="link" href="#/stats">Tout l’historique</a>
     </section>`;
 }
@@ -575,7 +618,7 @@ function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch
 
 function viewHelp() {
   const row = (label, r, e, a) => `<tr><td>${label}</td><td class="center">${r}</td><td class="center">${e}</td><td class="center">${a}</td></tr>`;
-  const Y = '<span class="yes">✓</span>', N = '<span class="no">—</span>', V = '<span class="small">avec validation</span>';
+  const Y = '<span class="yes">✓</span>', N = '<span class="no">—</span>', V = '<span class="yes">✓</span><sup>*</sup>';
   const R = ROLE_CAN[S.role] || ROLE_CAN.reader;
   return `
   <section class="page narrow">
@@ -595,6 +638,7 @@ function viewHelp() {
         ${row('Inviter des membres', N, N, Y)}
       </tbody>
     </table></div>
+    <p class="small muted">* L’éditeur propose, ${OWNER} valide avant que ça s’applique.</p>
     <h2 class="h3">Le trajet d’une suggestion</h2>
     <ol class="steps">
       <li><b>Tu proposes</b> un titre depuis « Suggérer », avec un mot pour dire pourquoi.</li>
@@ -620,14 +664,14 @@ function viewReviews() {
   return `
   <section class="page">
     <div class="page-head"><span class="kanji-red" aria-hidden="true">評価</span><h1 class="display-sm">${own('Mes avis', `Les avis de ${OWNER}`)}</h1><span class="mono muted">${plural(items.length, 'titre noté ou commenté', 'titres notés ou commentés')}</span></div>
-    <div class="segs" role="group" aria-label="Type">${tabs}</div>
+    <div class="segs segs-scroll" role="group" aria-label="Type">${tabs}</div>
     ${items.length ? `<div class="reviews">${items.map(t => `
       <a class="review" href="#/titre/${encodeURIComponent(t.id)}">
         <span class="review-poster">${poster(t, 'poster-sm')}</span>
-        <span class="review-text"><b class="h3">${esc(t.title)}</b><span class="muted small">${esc(KINDS[t.kind]?.one || '')} · ${esc(t.genre || famOf(t).name)}</span>${(t.review || '').trim() ? `<span>« ${esc(t.review.trim())} »</span>` : ''}</span>
+        <span class="review-text"><b class="h3">${esc(t.title)}</b><span class="muted small">${esc(KINDS[t.kind]?.one || '')} · ${esc(t.genre || famOf(t).name)}</span>${(t.review || '').trim() ? `<span class="review-quote">« ${esc(t.review.trim())} »</span>` : ''}</span>
         <span class="review-score">${t.rating ? `<b>${t.rating}</b><small>/10</small>` : '<small>pas de note</small>'}</span>
       </a>`).join('')}</div>`
-      : `<div class="empty"><span class="kanji-big" aria-hidden="true">無</span><p>${own('Tu n’as encore noté aucun titre. Note-les depuis leur fiche.', `${OWNER} n’a encore noté aucun titre ici.`)}</p></div>`}
+      : `<div class="empty"><img src="img/logo-grave.png" alt="" width="72" height="72"><p>${own('Tu n’as encore noté aucun titre. Note-les depuis leur fiche.', `${OWNER} n’a encore noté aucun titre ici.`)}</p></div>`}
   </section>`;
 }
 
@@ -698,7 +742,8 @@ function card(t) {
     foot = `
       ${pct !== null ? `<span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>` : ''}
       <span class="prog-row"><span class="mono">${esc(progressText(t))}</span>
-      ${canPlus ? `<button class="plus" data-act="plus" data-id="${esc(t.id)}" aria-label="${isAdmin() ? 'Ajouter' : 'Proposer à ' + OWNER + ' d’ajouter'} un ${t.kind === 'manga' ? 'chapitre' : 'épisode'} à ${esc(t.title)}">${isAdmin() ? '+1' : 'Proposer +1'}</button>` : ''}</span>`;
+      ${canPlus ? `<button class="plus" data-act="plus" data-id="${esc(t.id)}" aria-label="${isAdmin() ? 'Ajouter' : 'Proposer à ' + OWNER + ' d’ajouter'} un ${t.kind === 'manga' ? 'chapitre' : 'épisode'} à ${esc(t.title)}">${isAdmin() ? '+1' : 'Proposer +1'}</button>` : ''}</span>
+      ${cardLeft(t)}`;
   } else if (t.status === 'fini') {
     foot = `<span class="mono">${t.kind === 'film' ? 'VU · ' : ''}${t.rating ? t.rating + ' / 10' : '— / 10'}</span>`;
   } else {
@@ -811,7 +856,7 @@ function viewTitle(id) {
       ${isEditor() ? `
       <div class="block">
         <span class="label">TYPE</span>
-        <div class="segs" role="group" aria-label="Type du titre">${kindBtns}</div>
+        <div class="segs segs-fill" role="group" aria-label="Type du titre">${kindBtns}</div>
         ${kind !== t.kind ? `<p class="small muted">${KINDS[t.kind].one} → ${KINDS[kind].one}. ${film ? 'La progression ne s’applique plus à un film.' : 'La progression est convertie.'} ${isAdmin() ? 'Après l’enregistrement, tu pourras choisir la bonne affiche.' : ''}</p>` : ''}
       </div>` : ''}
       <div class="block">
@@ -825,10 +870,11 @@ function viewTitle(id) {
           ${manga ? stepper('chapter', 'Chapitre', 0) : stepper('season', 'Saison', 1) + stepper('episode', 'Épisode', 0)}
         </div>
         ${pct !== null ? `<span class="bar bar-lg"><i style="width:${pct.toFixed(1)}%"></i></span>` : ''}
-        <div class="row-between small">
+        <div class="prog-meta">
           <span class="mono muted">${manga ? 'Chap. ' + cur : 'S' + (d.season || 1) + ' · ép. ' + cur}${tot ? ' / ' + tot : ''}</span>
-          ${isEditor() ? `<label class="inline-field muted" for="d-total">${manga ? 'Chapitres' : 'Épisodes'} au total <input id="d-total" type="number" min="0" inputmode="numeric" value="${esc(d.total ?? '')}" placeholder="${esc(totalOf(t) || '?')}" data-in="draftNum" data-field="total"></label>` : ''}
+          ${(() => { const left = remainingText({ ...t, kind, chapter: d.chapter, episode: d.episode, total: tot }); return left ? `<span class="mono">${esc(left)}</span>` : ''; })()}
         </div>
+        ${isEditor() ? `<div class="field field-inline"><label for="d-total">${manga ? 'Chapitres' : 'Épisodes'} au total</label><input id="d-total" type="number" min="0" inputmode="numeric" value="${esc(d.total ?? '')}" placeholder="${esc(totalOf(t) || '?')}" data-in="draftNum" data-field="total"></div>` : ''}
       </div>`}
 
       ${providersBlock(t)}
@@ -867,8 +913,8 @@ function viewTitle(id) {
           <button class="btn ${t.fav ? 'btn-accent' : 'btn-ghost'}" data-act="toggleFav" data-id="${esc(t.id)}" aria-pressed="${!!t.fav}">${t.fav ? '★ Coup de cœur' : '☆ Marquer comme coup de cœur'}</button>
           <button class="btn btn-ghost" data-act="toggleFix">${S.fix.open ? 'Fermer' : 'Corriger l’affiche et les infos'}</button>
           ${S.ui.confirm === 'del:' + t.id
-            ? `<button class="btn btn-danger" data-act="deleteTitle" data-id="${esc(t.id)}">Confirmer la suppression</button><button class="link" data-act="cancelConfirm">Annuler</button>`
-            : `<button class="btn btn-ghost danger-text" data-act="askConfirm" data-key="del:${esc(t.id)}">Supprimer de la liste</button>`}
+            ? `<button class="btn btn-danger" data-act="deleteTitle" data-id="${esc(t.id)}">Oui, à la corbeille</button><button class="link" data-act="cancelConfirm">Annuler</button>`
+            : `<button class="btn btn-ghost danger-text" data-act="askConfirm" data-key="del:${esc(t.id)}">Mettre à la corbeille</button>`}
         </div>
         ${S.fix.open ? fixPanel(t) : ''}
       </div>` : ''}
@@ -979,7 +1025,7 @@ function viewAdd() {
     <div class="page-head"><span class="kanji-red" aria-hidden="true">${admin ? '追加' : '推薦'}</span><h1 class="display-sm">${admin ? 'Ajouter un titre' : 'Suggérer un titre'}</h1></div>
     <div class="add-grid">
       <div class="stack">
-        <div class="segs" role="group" aria-label="Type">${types}</div>
+        <div class="segs segs-fill" role="group" aria-label="Type">${types}</div>
         <form class="stack" data-submit="addSearch">
           <label class="search" for="addq">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
@@ -992,7 +1038,7 @@ function viewAdd() {
         ${chosen ? `
           ${dup ? `<p class="note">« ${esc(dup.title)} » est déjà dans la liste (${esc(STATUSES[dup.status]?.label || '')}).</p>` : ''}
           ${admin ? `
-            <div class="segs" role="group" aria-label="Statut de départ">${(A.kind === 'film' ? ['voir', 'fini'] : ['voir', 'cours', 'fini']).map(s => `<button class="seg ${A.status === s ? 'on' : ''}" data-act="addStatus" data-status="${s}">${statusPic(s)}${statusLabel(s, A.kind)}</button>`).join('')}</div>
+            <div class="segs segs-fill" role="group" aria-label="Statut de départ">${(A.kind === 'film' ? ['voir', 'fini'] : ['voir', 'cours', 'fini']).map(s => `<button class="seg ${A.status === s ? 'on' : ''}" data-act="addStatus" data-status="${s}">${statusPic(s)}${statusLabel(s, A.kind)}</button>`).join('')}</div>
             <button class="btn btn-accent btn-lg" data-act="addTitle" ${dup ? 'disabled' : ''}>Ajouter « ${esc(chosen.title)} »</button>` : `
             <div class="field"><label for="why">Pourquoi tu me le conseilles ?</label><textarea id="why" rows="3" maxlength="400" placeholder="Une phrase suffit." data-in="addNote">${esc(A.note)}</textarea></div>
             <button class="btn btn-accent btn-lg" data-act="suggest" ${dup ? 'disabled' : ''}>Envoyer « ${esc(chosen.title)} »</button>`}
@@ -1039,7 +1085,7 @@ function manualForm() {
         <span class="hint">Sans image, l’affiche prend la couleur choisie avec le titre écrit dessus. Tu pourras la corriger plus tard depuis la fiche.</span></div>
       <div class="manual-preview">${poster({ id: 'apercu', title: M.title || 'Titre', kind, status: admin ? A.status : 'voir', fam: M.fam, cover: validUrl(M.cover) ? M.cover : null, genre: M.genre })}</div>
       ${dup ? `<p class="note">« ${esc(dup.title)} » est déjà dans la liste.</p>` : ''}
-      ${admin ? `<div class="segs" role="group" aria-label="Statut de départ">${(kind === 'film' ? ['voir', 'fini'] : ['voir', 'cours', 'fini']).map(s => `<button type="button" class="seg ${A.status === s ? 'on' : ''}" data-act="addStatus" data-status="${s}">${statusPic(s)}${statusLabel(s, kind)}</button>`).join('')}</div>`
+      ${admin ? `<div class="segs segs-fill" role="group" aria-label="Statut de départ">${(kind === 'film' ? ['voir', 'fini'] : ['voir', 'cours', 'fini']).map(s => `<button type="button" class="seg ${A.status === s ? 'on' : ''}" data-act="addStatus" data-status="${s}">${statusPic(s)}${statusLabel(s, kind)}</button>`).join('')}</div>`
         : `<div class="field"><label for="m-why">Pourquoi tu me le conseilles ?</label><textarea id="m-why" rows="2" maxlength="400" data-in="addNote">${esc(A.note)}</textarea></div>`}
       <button class="btn btn-accent btn-lg" ${dup ? 'disabled' : ''}>${admin ? 'Ajouter à ma liste' : `Envoyer à ${OWNER}`}</button>
     </form>`;
@@ -1082,7 +1128,8 @@ function viewValidate() {
     .map(([k, l]) => `<button class="seg ${f === k ? 'on' : ''}" data-act="vfilter" data-f="${k}">${l} <span class="mono">${n(k)}</span></button>`).join('');
 
   const label = { kind: 'Type', status: 'Statut', season: 'Saison', episode: 'Épisode', chapter: 'Chapitre', total: 'Total', rating: 'Note', review: 'Avis', startedAt: 'Début', finishedAt: 'Fin', genre: 'Genre', fam: 'Couleur' };
-  const show = (k, v) => v === null || v === undefined || v === '' ? '—' : k === 'status' ? (STATUSES[v]?.label || v) : k === 'kind' ? (KINDS[v]?.one || v) : k === 'fam' ? (FAMILIES[v]?.name || v) : k === 'rating' ? v + '/10' : String(v);
+  const clip = v => v.length > 160 ? v.slice(0, 157).trimEnd() + '…' : v;
+  const show = (k, v) => v === null || v === undefined || v === '' ? '—' : k === 'status' ? (STATUSES[v]?.label || v) : k === 'kind' ? (KINDS[v]?.one || v) : k === 'fam' ? (FAMILIES[v]?.name || v) : k === 'rating' ? v + '/10' : clip(String(v));
 
   const rows = items.map(x => {
     if (x.kind === 'access') {
@@ -1124,7 +1171,7 @@ function viewValidate() {
   return `
   <section class="page">
     <div class="page-head"><span class="kanji-red" aria-hidden="true">審査</span><h1 class="display-sm">À valider</h1><span class="mono muted">${plural(n('all'), 'demande en attente', 'demandes en attente')}</span></div>
-    <div class="segs" role="group" aria-label="Type de demande">${filters}</div>
+    <div class="segs segs-scroll" role="group" aria-label="Type de demande">${filters}</div>
     <div class="stack">${rows || `<div class="empty"><img src="img/logo-grave.png" alt="" width="72" height="72"><p>Rien à valider. Tout est à jour.</p></div>`}</div>
     <p class="muted small">Une suggestion acceptée entre dans ta liste en « À voir ». Une modification acceptée s’applique au titre et part dans l’historique. La personne voit la décision dans « Mes demandes ».</p>
   </section>`;
@@ -1137,7 +1184,7 @@ function viewMembers() {
   const rows = S.members.slice().sort((a, b) => (a.role === 'admin' ? -1 : b.role === 'admin' ? 1 : a.id.localeCompare(b.id))).map(m => {
     const self = m.id === S.email;
     const roleCell = m.role === 'admin' ? `<span class="admin-chip"><img src="img/logo-tampon.png" alt="" width="28" height="28">Admin</span>` : `
-      <div class="segs tight" role="group" aria-label="Rôle de ${esc(m.id)}">
+      <div class="segs segs-fill" role="group" aria-label="Rôle de ${esc(m.id)}">
         <button class="seg ${m.role === 'reader' ? 'on' : ''}" data-act="setRole" data-id="${esc(m.id)}" data-role="reader">Lecteur</button>
         <button class="seg ${m.role === 'editor' ? 'on' : ''}" data-act="setRole" data-id="${esc(m.id)}" data-role="editor">Éditeur</button>
       </div>`;
@@ -1145,7 +1192,16 @@ function viewMembers() {
       ? `<button class="btn btn-danger" data-act="removeMember" data-id="${esc(m.id)}">Confirmer</button> <button class="link" data-act="cancelConfirm">Annuler</button>`
       : `<button class="link danger-text" data-act="askConfirm" data-key="rm:${esc(m.id)}">Retirer</button>`;
     const invite = self || m.role === 'admin' ? '' : `<button class="link" data-act="showInvite" data-id="${esc(m.id)}">Invitation</button> `;
-    return `<tr><td class="wrap-any"><b>${esc(m.pseudo || '—')}</b><br><span class="muted small">${esc(m.id)}</span>${m.uid ? '' : '<br><span class="muted small">pas encore connecté</span>'}</td><td>${roleCell}</td><td class="muted small">${m.addedAt ? 'Ajouté le ' + new Date(tsMillis(m.addedAt)).toLocaleDateString('fr-FR') : ''}</td><td class="right nowrap">${invite}${action}</td></tr>`;
+    return `
+      <li class="member">
+        <div class="member-id">
+          <b>${esc(m.pseudo || 'Sans pseudo')}</b>
+          <span class="muted small wrap-any">${esc(m.id)}</span>
+          <span class="muted small">${[m.uid ? '' : 'pas encore connecté', m.addedAt ? 'ajouté le ' + new Date(tsMillis(m.addedAt)).toLocaleDateString('fr-FR') : ''].filter(Boolean).join(' · ')}</span>
+        </div>
+        <div class="member-role">${roleCell}</div>
+        ${invite || action ? `<div class="member-actions">${invite}${action}</div>` : ''}
+      </li>`;
   }).join('');
 
   return `
@@ -1156,7 +1212,7 @@ function viewMembers() {
       <label for="nm-email"><b>Autoriser un email</b></label>
       <div class="add-row">
         <input id="nm-email" type="email" placeholder="ami@exemple.fr" value="${esc(N.email)}" data-in="nmEmail" autocomplete="off" required>
-        <div class="segs tight" role="group" aria-label="Rôle">
+        <div class="segs segs-fill" role="group" aria-label="Rôle">
           <button type="button" class="seg ${N.role === 'reader' ? 'on' : ''}" data-act="nmRole" data-role="reader">Lecteur</button>
           <button type="button" class="seg ${N.role === 'editor' ? 'on' : ''}" data-act="nmRole" data-role="editor">Éditeur</button>
         </div>
@@ -1170,10 +1226,7 @@ function viewMembers() {
       <textarea id="invite-text" rows="9" readonly>${esc(inviteText(N.invite))}</textarea>
       <div class="chips"><button class="btn btn-ink" data-act="copyInvite">Copier le message</button><span class="muted small">Colle-le dans WhatsApp, un SMS ou un email : le site n’envoie rien tout seul.</span></div>
     </div>` : ''}
-    <div class="table-wrap"><table class="table">
-      <thead><tr><th>PSEUDO · EMAIL</th><th>RÔLE</th><th>AJOUT</th><th class="right">ACTION</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>
+    <ul class="members">${rows}</ul>
     <div class="two muted small">
       <p><b>Lecteur</b> : voit la liste, marque ce qu’il a vu, suit des titres, suggère et vote.</p>
       <p><b>Éditeur</b> : tout ce que fait un lecteur, et propose des modifications que tu valides.</p>
@@ -1196,6 +1249,15 @@ function viewStats() {
     if (eps) { minutes += eps * m.duration; counted++; }
   }
   const hours = Math.round(minutes / 60);
+  // Ce qui reste : la fin des titres en cours + tout le « À voir »
+  let leftCours = 0, leftVoir = 0, unknown = 0;
+  for (const t of T) {
+    if (t.status === 'cours') { const r = remaining(t); if (r && r.minutes) leftCours += r.minutes; else if (t.kind !== 'manga') unknown++; }
+    else if (t.status === 'voir' && t.kind !== 'manga') {
+      const m = metaOf(t), tot = t.kind === 'film' ? 1 : totalOf(t);
+      if (m.duration && tot) leftVoir += tot * m.duration; else unknown++;
+    }
+  }
   const famCounts = Object.keys(FAMILIES).map(k => ({ k, n: T.filter(t => t.fam === k).length })).filter(x => x.n).sort((a, b) => b.n - a.n);
   const max = famCounts[0]?.n || 1;
   const byKind = Object.keys(KINDS).map(k => T.filter(t => t.kind === k).length);
@@ -1212,7 +1274,8 @@ function viewStats() {
     <div class="page-head"><span class="kanji-red" aria-hidden="true">統計</span><h1 class="display-sm">Stats</h1></div>
     <div class="tiles">
       <div class="tile"><span class="mono muted small">TEMPS DEVANT L’ÉCRAN</span><b class="tile-num">${hours ? '≈ ' + hours + ' h' : '— h'}</b><span class="muted small">${counted ? 'Estimation : épisodes vus × durée, sur ' + plural(counted, 'titre', 'titres') : 'Se calcule quand les durées sont connues.'}</span></div>
-      <div class="tile"><span class="mono muted small">TITRES SUIVIS</span><b class="tile-num">${T.length}</b><span class="muted small">${byKind[0]} animes · ${byKind[1]} mangas · ${byKind[2]} séries · ${byKind[3]} films</span></div>
+      <div class="tile"><span class="mono muted small">${own('IL TE RESTE', `IL RESTE À ${OWNER.toUpperCase()}`)}</span><b class="tile-num">${leftCours + leftVoir ? '≈ ' + fmtDuration(leftCours + leftVoir) : '—'}</b><span class="muted small">En cours : ${leftCours ? '≈ ' + fmtDuration(leftCours) : '—'} · À voir : ${leftVoir ? '≈ ' + fmtDuration(leftVoir) : '—'}${unknown ? ` · ${plural(unknown, 'titre', 'titres')} sans durée connue` : ''}</span></div>
+      <div class="tile"><span class="mono muted small">TITRES SUIVIS</span><b class="tile-num">${T.length}</b><span class="muted small">${[plural(byKind[0], 'anime', 'animes'), plural(byKind[1], 'manga', 'mangas'), plural(byKind[2], 'série', 'séries'), plural(byKind[3], 'film', 'films')].join(' · ')}</span></div>
       <div class="tile"><span class="mono muted small">GENRE PRÉFÉRÉ</span><b class="tile-num tile-word">${famCounts[0] ? esc(FAMILIES[famCounts[0].k].name) : '—'}</b><span class="muted small">${famCounts[0] ? famCounts[0].n + ' titres sur ' + T.length : ''}${avg ? ' · note moyenne ' + avg + '/10' : ''}</span></div>
     </div>
     <div class="two-wide">
@@ -1231,13 +1294,57 @@ function viewStats() {
     </div>
     <div class="stack">
       <h2 class="h3">Historique</h2>
-      ${S.history.length ? `<div class="table-wrap"><table class="table">
-        <thead><tr><th>QUAND</th><th>QUI</th><th>CHANGEMENT</th></tr></thead>
-        <tbody>${S.history.map(h => `<tr><td class="mono muted nowrap">${fmtWhen(h.at)}</td><td class="nowrap">${esc(isEmail(h.byName) ? OWNER : (h.byName || OWNER))}</td><td class="wrap-any">${esc(h.text)}</td></tr>`).join('')}</tbody>
-      </table></div>` : `<p class="muted small">Aucun changement enregistré pour l’instant.</p>`}
+      ${S.history.length ? `<ul class="log">${S.history.map(h => `<li><span class="wrap-any">${esc(h.text)}</span><span class="mono muted small">${fmtWhen(h.at)} · ${esc(isEmail(h.byName) ? OWNER : (h.byName || OWNER))}</span></li>`).join('')}</ul>` : `<p class="muted small">Aucun changement enregistré pour l’instant.</p>`}
       ${isAdmin() ? `<button class="btn btn-ghost" data-act="exportJson">Télécharger mes données (JSON)</button>` : ''}
     </div>
   </section>`;
+}
+
+/* ------------------------------------------------------------------ corbeille */
+
+const TRASH_DAYS = 30;
+const trashDaysLeft = x => Math.max(0, TRASH_DAYS - Math.floor((Date.now() - (tsMillis(x.deletedAt) || Date.now())) / 86400e3));
+
+function viewTrash() {
+  const items = S.trash;
+  return `
+  <section class="page narrow">
+    <div class="page-head"><span class="kanji-red" aria-hidden="true">屑籠</span><h1 class="display-sm">Corbeille</h1><span class="mono muted">${plural(items.length, 'titre', 'titres')} · supprimés définitivement après ${TRASH_DAYS} jours</span></div>
+    ${items.length ? `<div class="trash-list">${items.map(x => {
+      const left = trashDaysLeft(x);
+      return `
+      <article class="trash-item">
+        <span class="trash-poster">${poster(x, 'poster-sm')}</span>
+        <div class="trash-text">
+          <b>${esc(x.title)}</b>
+          <span class="muted small">${esc(KINDS[x.kind]?.one || '')} · ${statusLabel(x.status, x.kind)} · supprimé ${fmtAgo(x.deletedAt)}</span>
+          <span class="mono small">${left > 1 ? `encore ${left} jours` : 'dernier jour'}</span>
+          <div class="chips">
+            <button class="btn btn-ink" data-act="restoreTitle" data-id="${esc(x.id)}">Restaurer</button>
+            ${S.ui.confirm === 'purge:' + x.id
+              ? `<button class="btn btn-danger" data-act="purgeTitle" data-id="${esc(x.id)}">Supprimer pour de bon</button><button class="link" data-act="cancelConfirm">Annuler</button>`
+              : `<button class="link danger-text" data-act="askConfirm" data-key="purge:${esc(x.id)}">Supprimer définitivement</button>`}
+          </div>
+        </div>
+      </article>`;
+    }).join('')}</div>`
+    : `<div class="empty"><img src="img/logo-grave.png" alt="" width="72" height="72"><p>La corbeille est vide.</p></div>`}
+  </section>`;
+}
+
+/** Efface pour de bon un titre de la corbeille, avec les « vu aussi » des membres. */
+async function purgeOne(x) {
+  const seen = await F.getDocs(F.collection(F.db, 'titles', x.id, 'seen')).catch(() => ({ docs: [] }));
+  const b = F.writeBatch(F.db);
+  for (const d of seen.docs) b.delete(F.doc(F.db, 'titles', x.id, 'seen', d.id));
+  b.delete(F.doc(F.db, 'trash', x.id));
+  await sent(b.commit());
+}
+/** À l'ouverture, l'admin vide ce qui a passé 30 jours dans la corbeille. */
+async function purgeTrash() {
+  for (const x of S.trash.filter(x => tsMillis(x.deletedAt) && trashDaysLeft(x) === 0)) {
+    try { await purgeOne(x); } catch (e) { /* on réessaiera à la prochaine ouverture */ }
+  }
 }
 
 /* ------------------------------------------------------------------ profil */
@@ -1335,7 +1442,7 @@ F.onAuthStateChanged(F.auth, async user => {
   S.user = user; S.member = null; S.role = null; S.titles = []; S.titlesReady = false;
   S.requests = []; S.members = []; S.access = []; S.history = []; S.airing = []; S.airingDone = false;
   S.adminLog = []; S.seen = {}; S.follows = null; S.welcomeOpen = false;
-  S.names = {}; S.pseudoKeys = {}; S.prov = {}; S.streaming = null; S.flash = {}; S.lastUpdated = {};
+  S.names = {}; S.pseudoKeys = {}; S.prov = {}; S.streaming = null; S.flash = {}; S.lastUpdated = {}; S.trash = [];
   S.login.err = ''; S.login.busy = false;
   if (!user) { S.phase = 'login'; return render(); }
   S.email = (user.email || '').toLowerCase();
@@ -1410,6 +1517,12 @@ function startListeners() {
     render();
   }, () => { S.streaming = { sites: [] }; }));
   if (isAdmin()) {
+    let purged = false;
+    S.unsub.push(F.onSnapshot(F.collection(F.db, 'trash'), snap => {
+      S.trash = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => tsMillis(b.deletedAt) - tsMillis(a.deletedAt));
+      if (!purged) { purged = true; purgeTrash(); }
+      render();
+    }, onListenErr));
     S.unsub.push(F.onSnapshot(F.collection(F.db, 'members'), snap => {
       S.members = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       render();
@@ -1646,13 +1759,13 @@ const ACT = {
         const b = F.writeBatch(F.db);
         b.update(F.doc(F.db, 'titles', t.id), { ...changes, updatedAt: F.serverTimestamp() });
         historyEntry(b, describeChanges(t.title, changes, before) + ' (tirage au sort)');
-        await b.commit();
+        await sent(b.commit());
         toast(t.kind === 'film' ? `${t.title} passe en Vu. Bon film !` : `${t.title} passe en En cours. Bon visionnage !`);
       } else {
-        await F.addDoc(F.collection(F.db, 'requests'), {
+        await sent(F.addDoc(F.collection(F.db, 'requests'), {
           type: 'edit', by: S.uid, byName: myName(), status: 'pending', createdAt: F.serverTimestamp(),
           titleId: t.id, titleName: t.title, changes, before
-        });
+        }));
         toast(`Proposé à ${OWNER} : commencer ${t.title}.`);
       }
       S.ui.pick = null; S.ui.rolls = 0; render();
@@ -1669,14 +1782,14 @@ const ACT = {
         const b = F.writeBatch(F.db);
         b.update(F.doc(F.db, 'titles', t.id), { [field]: after, updatedAt: F.serverTimestamp() });
         historyEntry(b, `${t.title} : ${field === 'chapter' ? 'chap.' : 'ép.'} ${before} → ${after}`);
-        await b.commit();
+        await sent(b.commit());
         const tot = totalOf(t);
         if (tot && after >= tot) toast(`Dernier ${field === 'chapter' ? 'chapitre' : 'épisode'} de ${t.title} ! Passe-le en « Terminé » dans sa fiche.`);
       } else {
-        await F.addDoc(F.collection(F.db, 'requests'), {
+        await sent(F.addDoc(F.collection(F.db, 'requests'), {
           type: 'edit', by: S.uid, byName: myName(), status: 'pending', createdAt: F.serverTimestamp(),
           titleId: t.id, titleName: t.title, changes: { [field]: after }, before: { [field]: before }
-        });
+        }));
         toast(`Proposé à ${OWNER} : ${t.title} ${field === 'chapter' ? 'chap.' : 'ép.'} ${after}`);
       }
     } catch (e) { toast(errText(e)); }
@@ -1695,7 +1808,7 @@ const ACT = {
         });
       }
       historyEntry(b, `Import de la liste de départ (${SEED.length} titres)`);
-      await b.commit();
+      await sent(b.commit());
       toast('Liste importée. Les affiches arrivent au fur et à mesure.');
     } catch (e) { el.disabled = false; toast(errText(e)); }
   },
@@ -1711,7 +1824,7 @@ const ACT = {
     try {
       const b = F.writeBatch(F.db);
       for (const t of missing) if (t.metaTried) b.update(F.doc(F.db, 'titles', t.id), { metaTried: false });
-      await b.commit();
+      await sent(b.commit());
     } catch (e) { toast(errText(e)); }
     resolveMeta();
   },
@@ -1726,7 +1839,7 @@ const ACT = {
         if (t) titles[id] = followSnapshot(t);
       }
       S.follows = { titles };
-      try { await F.setDoc(F.doc(F.db, 'follows', S.uid), S.follows); } catch (e) { toast(errText(e)); }
+      try { await sent(F.setDoc(F.doc(F.db, 'follows', S.uid), S.follows)); } catch (e) { toast(errText(e)); }
     }
     render();
   },
@@ -1738,17 +1851,17 @@ const ACT = {
       const b = F.writeBatch(F.db);
       b.update(F.doc(F.db, 'titles', t.id), { fav: !t.fav });
       if (!t.fav) historyEntry(b, `${t.title} rejoint les coups de cœur`);
-      await b.commit();
+      await sent(b.commit());
     } catch (e) { toast(errText(e)); }
   },
   toggleSeen: async el => {
     const id = el.dataset.id, list = S.seen[id] || [];
     const me = list.find(x => x.id === S.uid || x.id === S.email);
     try {
-      if (me) { await F.deleteDoc(F.doc(F.db, 'titles', id, 'seen', me.id)); S.seen[id] = list.filter(x => x !== me); }
+      if (me) { await sent(F.deleteDoc(F.doc(F.db, 'titles', id, 'seen', me.id))); S.seen[id] = list.filter(x => x !== me); }
       else {
         const row = { name: myName(), rating: null, at: F.serverTimestamp() };
-        await F.setDoc(F.doc(F.db, 'titles', id, 'seen', S.uid), row);
+        await sent(F.setDoc(F.doc(F.db, 'titles', id, 'seen', S.uid), row));
         S.seen[id] = list.concat([{ id: S.uid, ...row }]);
       }
       render();
@@ -1760,7 +1873,7 @@ const ACT = {
     if (!me) return;
     const rating = me.rating === v ? null : v;
     try {
-      await F.setDoc(F.doc(F.db, 'titles', id, 'seen', me.id), { name: myName(), rating, at: F.serverTimestamp() });
+      await sent(F.setDoc(F.doc(F.db, 'titles', id, 'seen', me.id), { name: myName(), rating, at: F.serverTimestamp() }));
       me.rating = rating; render();
     } catch (e) { toast(errText(e)); }
   },
@@ -1772,7 +1885,7 @@ const ACT = {
     const before = S.follows;
     S.follows = { titles };
     render();
-    try { await F.setDoc(F.doc(F.db, 'follows', S.uid), S.follows); toast(titles[id] ? `Tu seras prévenu quand ${t.title} avance.` : `Tu ne suis plus ${t.title}.`); }
+    try { await sent(F.setDoc(F.doc(F.db, 'follows', S.uid), S.follows)); toast(titles[id] ? `Tu seras prévenu quand ${t.title} avance.` : `Tu ne suis plus ${t.title}.`); }
     catch (e) { S.follows = before; render(); toast(errText(e)); }
   },
   showInvite: el => { S.newMember.invite = el.dataset.id; S.newMember.msg = ''; render(); },
@@ -1823,7 +1936,7 @@ const ACT = {
         const b = F.writeBatch(F.db);
         b.update(F.doc(F.db, 'titles', t.id), { ...changes, ...(kindChanged ? { total: changes.total ?? null } : {}), updatedAt: F.serverTimestamp() });
         historyEntry(b, describeChanges(t.title, changes, before));
-        await b.commit();
+        await sent(b.commit());
         S.draft = null;
         if (kindChanged) {
           // Nouveau type : on propose tout de suite une affiche et des infos qui vont avec
@@ -1831,10 +1944,10 @@ const ACT = {
           toast(`${t.title} est maintenant un ${KINDS[changes.kind].one.toLowerCase()}. Choisis la bonne affiche ci-dessous.`);
         } else toast('Enregistré.');
       } else {
-        await F.addDoc(F.collection(F.db, 'requests'), {
+        await sent(F.addDoc(F.collection(F.db, 'requests'), {
           type: 'edit', by: S.uid, byName: myName(), status: 'pending', createdAt: F.serverTimestamp(),
           titleId: t.id, titleName: t.title, changes, before
-        });
+        }));
         S.draft = null;
         toast(`Modification envoyée à ${OWNER}.`);
       }
@@ -1846,13 +1959,15 @@ const ACT = {
     const t = S.titles.find(x => x.id === el.dataset.id);
     if (!t) return;
     try {
+      const { id, ...data } = t;
       const b = F.writeBatch(F.db);
-      b.delete(F.doc(F.db, 'titles', t.id));
+      b.set(F.doc(F.db, 'trash', id), { ...data, deletedAt: F.serverTimestamp() });
+      b.delete(F.doc(F.db, 'titles', id));
       historyEntry(b, `${t.title} retiré de la liste`);
-      await b.commit();
+      await sent(b.commit());
       S.ui.confirm = null; S.draft = null;
       location.hash = kindHash(t.kind);
-      toast(`${t.title} supprimé.`);
+      toast(`${t.title} est dans la corbeille pendant 30 jours.`);
     } catch (e) { toast(errText(e)); }
   },
   toggleFix: () => { S.fix.open = !S.fix.open; render(); },
@@ -1865,7 +1980,7 @@ const ACT = {
       const b = F.writeBatch(F.db);
       b.update(F.doc(F.db, 'titles', t.id), patch);
       historyEntry(b, `${t.title} : affiche et infos corrigées (${r.title})`);
-      await b.commit();
+      await sent(b.commit());
       try { localStorage.removeItem(META_CACHE + t.id); } catch (e) { /* ignore */ }
       delete S.localMeta[t.id];
       S.fix.open = false; S.draft = null;
@@ -1892,7 +2007,7 @@ const ACT = {
       const b = F.writeBatch(F.db);
       b.set(F.doc(F.collection(F.db, 'titles')), titleFromItem(item, S.add.status));
       historyEntry(b, `${item.title} ajouté (${STATUSES[S.add.status].label})`);
-      await b.commit();
+      await sent(b.commit());
       toast(`${item.title} ajouté à ta liste.`);
       Object.assign(S.add, { q: '', results: [], chosen: null });
       render();
@@ -1904,10 +2019,10 @@ const ACT = {
     el.disabled = true;
     try {
       const clean = cleanItem(item);
-      await F.addDoc(F.collection(F.db, 'requests'), {
+      await sent(F.addDoc(F.collection(F.db, 'requests'), {
         type: 'suggestion', by: S.uid, byName: myName(), status: 'pending',
         createdAt: F.serverTimestamp(), item: clean, note: S.add.note.trim()
-      });
+      }));
       toast(`${item.title} envoyé à ${OWNER}.`);
       Object.assign(S.add, { q: '', results: [], chosen: null, note: '' });
       render();
@@ -1919,8 +2034,8 @@ const ACT = {
     S.votes[id] = { count: v.count + (v.mine ? -1 : 1), mine: !v.mine };
     render();
     try {
-      if (v.mine) { await F.deleteDoc(ref); await F.deleteDoc(F.doc(F.db, 'requests', id, 'votes', S.email)).catch(() => {}); }
-      else await F.setDoc(ref, { at: F.serverTimestamp() });
+      if (v.mine) { await sent(F.deleteDoc(ref)); F.deleteDoc(F.doc(F.db, 'requests', id, 'votes', S.email)).catch(() => {}); }
+      else await sent(F.setDoc(ref, { at: F.serverTimestamp() }));
     }
     catch (e) { S.votes[id] = v; render(); toast(errText(e)); }
   },
@@ -1936,7 +2051,7 @@ const ACT = {
       b.set(F.doc(F.collection(F.db, 'titles')), titleFromItem(r.item, 'voir'));
       b.update(F.doc(F.db, 'requests', r.id), { status: 'accepted', decidedAt: F.serverTimestamp() });
       historyEntry(b, `Suggestion de ${displayName(r.by, r.byName)} acceptée : ${r.item.title} ajouté en À voir`);
-      await b.commit();
+      await sent(b.commit());
       toast(`${r.item.title} ajouté en À voir.`);
     } catch (e) { el.disabled = false; toast(errText(e)); }
   },
@@ -1951,7 +2066,7 @@ const ACT = {
       b.update(F.doc(F.db, 'titles', t.id), { ...r.changes, ...(kindChanged ? { total: r.changes.total ?? null } : {}), updatedAt: F.serverTimestamp() });
       b.update(F.doc(F.db, 'requests', r.id), { status: 'accepted', decidedAt: F.serverTimestamp() });
       historyEntry(b, describeChanges(t.title, r.changes, r.before || {}) + ` (proposé par ${displayName(r.by, r.byName)})`);
-      await b.commit();
+      await sent(b.commit());
       if (kindChanged) { S.fixAfter = t.id; S.draft = null; location.hash = '#/titre/' + encodeURIComponent(t.id); toast('Type changé. Choisis la nouvelle affiche dans la fiche.'); }
       else toast('Modification appliquée.');
     } catch (e) { el.disabled = false; toast(errText(e)); }
@@ -1968,12 +2083,12 @@ const ACT = {
       b.set(F.doc(F.db, 'members', a.id), { role: 'reader', name: a.id.split('@')[0], addedAt: F.serverTimestamp() });
       b.delete(F.doc(F.db, 'accessRequests', a.id));
       adminLogEntry(b, `${a.id} ajouté comme lecteur`);
-      await b.commit();
+      await sent(b.commit());
       toast(`${a.id} peut maintenant entrer.`);
     } catch (e) { toast(errText(e)); }
   },
   refuseAccess: async el => {
-    try { await F.deleteDoc(F.doc(F.db, 'accessRequests', el.dataset.id)); toast('Demande d’accès refusée.'); }
+    try { await sent(F.deleteDoc(F.doc(F.db, 'accessRequests', el.dataset.id))); toast('Demande d’accès refusée.'); }
     catch (e) { toast(errText(e)); }
   },
 
@@ -1986,7 +2101,7 @@ const ACT = {
       const b = F.writeBatch(F.db);
       b.update(F.doc(F.db, 'members', id), { role });
       adminLogEntry(b, `${id} passe ${role === 'editor' ? 'éditeur' : 'lecteur'}`);
-      await b.commit();
+      await sent(b.commit());
     } catch (e) { toast(errText(e)); }
   },
   removeMember: async el => {
@@ -1995,16 +2110,36 @@ const ACT = {
       const b = F.writeBatch(F.db);
       b.delete(F.doc(F.db, 'members', id));
       adminLogEntry(b, `${id} retiré des membres`);
-      await b.commit();
+      await sent(b.commit());
       S.ui.confirm = null;
       toast(`${id} n’a plus accès.`);
     } catch (e) { toast(errText(e)); }
   },
 
   applyUpdate: () => applyUpdate(),
+  restoreTitle: async el => {
+    const x = S.trash.find(z => z.id === el.dataset.id);
+    if (!x) return;
+    const { id, deletedAt, ...data } = x;
+    if (S.titles.some(t => t.id === id)) return toast('Ce titre est déjà dans la liste.');
+    try {
+      const b = F.writeBatch(F.db);
+      b.set(F.doc(F.db, 'titles', id), { ...data, updatedAt: F.serverTimestamp() });
+      b.delete(F.doc(F.db, 'trash', id));
+      historyEntry(b, `${x.title} restauré depuis la corbeille`);
+      await sent(b.commit());
+      toast(`${x.title} est de retour dans ${KINDS[x.kind]?.label.toLowerCase() || 'la liste'}.`);
+    } catch (e) { toast(errText(e)); }
+  },
+  purgeTitle: async el => {
+    const x = S.trash.find(z => z.id === el.dataset.id);
+    if (!x) return;
+    try { await purgeOne(x); S.ui.confirm = null; toast(`${x.title} supprimé pour de bon.`); }
+    catch (e) { toast(errText(e)); }
+  },
   removeSite: async el => {
     const i = +el.dataset.i, sites = ((S.streaming && S.streaming.sites) || []).filter((_, j) => j !== i);
-    try { await F.setDoc(F.doc(F.db, 'settings', 'streaming'), { sites }); S.ui.confirm = null; toast('Site retiré.'); }
+    try { await sent(F.setDoc(F.doc(F.db, 'settings', 'streaming'), { sites })); S.ui.confirm = null; toast('Site retiré.'); }
     catch (e) { toast(errText(e)); }
   },
 
@@ -2038,7 +2173,7 @@ const SUBMIT = {
     S.login.msg = 'Si cet email a un compte, un lien pour choisir un nouveau mot de passe vient de partir.';
   },
   requestAccess: async fd => {
-    await F.setDoc(F.doc(F.db, 'accessRequests', S.email), { email: S.email, note: (fd.get('note') || '').trim().slice(0, 400), at: F.serverTimestamp() });
+    await sent(F.setDoc(F.doc(F.db, 'accessRequests', S.email), { email: S.email, note: (fd.get('note') || '').trim().slice(0, 400), at: F.serverTimestamp() }));
     S.myAccess = true;
   },
   addSearch: async () => { await runAddSearch(); },
@@ -2052,13 +2187,13 @@ const SUBMIT = {
       const b = F.writeBatch(F.db);
       b.set(F.doc(F.collection(F.db, 'titles')), titleFromItem(item, status));
       historyEntry(b, `${item.title} ajouté à la main (${statusLabel(status, item.kind)})`);
-      await b.commit();
+      await sent(b.commit());
       toast(`${item.title} ajouté à ta liste.`);
     } else {
-      await F.addDoc(F.collection(F.db, 'requests'), {
+      await sent(F.addDoc(F.collection(F.db, 'requests'), {
         type: 'suggestion', by: S.uid, byName: myName(), status: 'pending',
         createdAt: F.serverTimestamp(), item: cleanItem(item), note: A.note.trim()
-      });
+      }));
       toast(`${item.title} envoyé à ${OWNER}.`);
     }
     S.manual = { title: '', genre: '', fam: 'aven', total: '', year: '', cover: '' };
@@ -2087,7 +2222,7 @@ const SUBMIT = {
       b.set(F.doc(F.db, 'pseudos', key), { uid: S.uid, pseudo, key });
       if (oldKey && oldKey !== key) b.delete(F.doc(F.db, 'pseudos', oldKey));
       b.update(F.doc(F.db, 'members', S.email), { pseudo, pseudoKey: key, uid: S.uid });
-      await b.commit();
+      await sent(b.commit());
       Object.assign(S.member, { pseudo, pseudoKey: key, uid: S.uid });
       P.msg = `C’est noté : les membres te voient maintenant comme « ${pseudo} ».`;
     } catch (e) {
@@ -2101,7 +2236,7 @@ const SUBMIT = {
     try { ok = ['http:', 'https:'].includes(new URL(url).protocol); } catch (e) { /* adresse invalide */ }
     if (!name || !ok) { toast('Il faut un nom et une adresse qui commence par https://'); return; }
     const sites = ((S.streaming && S.streaming.sites) || []).concat([{ name: name.slice(0, 40), url, note: note.slice(0, 120) }]);
-    await F.setDoc(F.doc(F.db, 'settings', 'streaming'), { sites });
+    await sent(F.setDoc(F.doc(F.db, 'settings', 'streaming'), { sites }));
     S.newSite = { name: '', url: '', note: '' };
     toast(`${name} ajouté.`);
   },
@@ -2113,7 +2248,7 @@ const SUBMIT = {
     b.set(F.doc(F.db, 'members', email), { role: S.newMember.role, name: email.split('@')[0], addedAt: F.serverTimestamp() });
     if (S.access.some(a => a.id === email)) b.delete(F.doc(F.db, 'accessRequests', email));
     adminLogEntry(b, `${email} ajouté comme ${S.newMember.role === 'editor' ? 'éditeur' : 'lecteur'}`);
-    await b.commit();
+    await sent(b.commit());
     S.newMember = { email: '', role: S.newMember.role, msg: `${email} a accès. Envoie-lui le message ci-dessous pour le prévenir.`, invite: email };
   }
 };
@@ -2196,6 +2331,11 @@ window.addEventListener('hashchange', () => {
 });
 
 render();
+
+/* ------------------------------------------------------------------ connexion réseau */
+
+window.addEventListener('online', () => { S.online = true; render(); });
+window.addEventListener('offline', () => { S.online = false; render(); });
 
 /* ------------------------------------------------------------------ mises à jour du site */
 
