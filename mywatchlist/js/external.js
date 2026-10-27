@@ -1,5 +1,6 @@
-// Recherche et métadonnées publiques : AniList (animes et mangas) et TVmaze (séries).
-// Les deux API sont gratuites, sans clé, et acceptent les appels depuis le navigateur.
+// Recherche et métadonnées publiques : AniList (animes, mangas, films d'animation), TVmaze (séries)
+// et TMDB (films, plateformes de streaming en France) quand une clé est configurée.
+import { TMDB_KEY } from './config.js';
 
 const ANILIST = 'https://graphql.anilist.co';
 const TVMAZE = 'https://api.tvmaze.com';
@@ -42,30 +43,90 @@ async function anilist(query, variables, tries = 3) {
   });
 }
 
-async function fetchJson(url, tries = 3) {
+async function fetchJson(url, name = 'TVmaze', tries = 3) {
   for (let i = 0; i < tries; i++) {
     let res;
     try { res = await fetch(url); }
-    catch (e) { if (i === tries - 1) throw new Error('TVmaze injoignable.'); await sleep(1500); continue; }
+    catch (e) { if (i === tries - 1) throw new Error(name + ' injoignable.'); await sleep(1500); continue; }
     if (res.status === 429 || res.status >= 500) { await sleep(1500 * (i + 1)); continue; }
-    if (!res.ok) throw new Error('TVmaze : HTTP ' + res.status);
+    if (res.status === 401) throw new Error(name + ' : clé API refusée.');
+    if (!res.ok) throw new Error(name + ' : HTTP ' + res.status);
     return res.json();
   }
-  throw new Error('TVmaze ne répond pas pour le moment.');
+  throw new Error(name + ' ne répond pas pour le moment.');
+}
+
+/* ---------- TMDB ---------- */
+const TMDB = 'https://api.themoviedb.org/3';
+const TMDB_IMG = 'https://image.tmdb.org/t/p/';
+export const hasTmdb = () => !!TMDB_KEY;
+function tmdb(path, params = {}) {
+  const q = new URLSearchParams({ api_key: TMDB_KEY, language: 'fr-FR', ...params });
+  return fetchJson(`${TMDB}${path}?${q}`, 'TMDB');
+}
+let movieGenreNames = null;
+async function movieGenres() {
+  if (!movieGenreNames) {
+    const j = await tmdb('/genre/movie/list');
+    movieGenreNames = Object.fromEntries((j.genres || []).map(g => [g.id, g.name]));
+  }
+  return movieGenreNames;
+}
+function mapMovie(m, G) {
+  return {
+    kind: 'film', source: 'tmdb', extId: m.id, malId: null,
+    title: m.title, altTitle: m.original_title && m.original_title !== m.title ? m.original_title : '',
+    cover: m.poster_path ? TMDB_IMG + 'w500' + m.poster_path : null,
+    total: null, duration: null, year: m.release_date ? +m.release_date.slice(0, 4) : null,
+    genres: (m.genre_ids || []).map(id => G[id]).filter(Boolean)
+  };
+}
+
+/** Plateformes où regarder un titre en France (abonnement, gratuit, location, achat), mises en cache 24 h. */
+export async function watchProviders(t) {
+  if (!TMDB_KEY || t.kind === 'manga') return null;
+  const type = t.kind === 'film' ? 'movie' : 'tv';
+  const key = 'mw:prov:' + type + ':' + (t.source === 'tmdb' ? t.extId : (t.title || '').toLowerCase());
+  try {
+    const hit = JSON.parse(localStorage.getItem(key) || 'null');
+    if (hit && Date.now() - hit.at < 24 * 3600e3) return hit.data;
+  } catch (e) { /* stockage indisponible */ }
+  let id = t.source === 'tmdb' ? t.extId : null;
+  for (const q of [t.title, t.altTitle].filter(Boolean)) {
+    if (id) break;
+    const j = await tmdb(`/search/${type}`, { query: q });
+    id = j.results && j.results[0] && j.results[0].id;
+  }
+  let data = { none: true };
+  if (id) {
+    const j = await tmdb(`/${type}/${id}/watch/providers`);
+    const fr = j.results && j.results.FR;
+    if (fr) {
+      const list = arr => {
+        const seen = new Set(), out = [];
+        for (const p of arr || []) if (!seen.has(p.provider_id)) { seen.add(p.provider_id); out.push({ name: p.provider_name, logo: p.logo_path ? TMDB_IMG + 'w92' + p.logo_path : null }); }
+        return out;
+      };
+      data = { link: fr.link, stream: list([...(fr.flatrate || []), ...(fr.free || []), ...(fr.ads || [])]), rent: list(fr.rent), buy: list(fr.buy) };
+      if (!data.stream.length && !data.rent.length && !data.buy.length) data = { none: true };
+    }
+  }
+  try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), data })); } catch (e) { /* ignore */ }
+  return data;
 }
 
 const MEDIA_FIELDS = `id idMal type format title { romaji english } coverImage { extraLarge large }
   episodes chapters volumes duration seasonYear startDate { year } genres status
   nextAiringEpisode { airingAt episode }`;
 
-const SEARCH_Q = `query ($search: String, $type: MediaType, $perPage: Int, $sort: [MediaSort]) {
-  Page(perPage: $perPage) { media(search: $search, type: $type, sort: $sort, isAdult: false) { ${MEDIA_FIELDS} } }
+const SEARCH_Q = `query ($search: String, $type: MediaType, $perPage: Int, $sort: [MediaSort], $formats: [MediaFormat]) {
+  Page(perPage: $perPage) { media(search: $search, type: $type, sort: $sort, format_in: $formats, isAdult: false) { ${MEDIA_FIELDS} } }
 }`;
 
-function mapMedia(m) {
+function mapMedia(m, asFilm) {
   const manga = m.type === 'MANGA';
   return {
-    kind: manga ? 'manga' : 'anime', source: 'anilist', extId: m.id, malId: m.idMal || null,
+    kind: asFilm ? 'film' : manga ? 'manga' : 'anime', source: 'anilist', extId: m.id, malId: m.idMal || null,
     title: (m.title && (m.title.english || m.title.romaji)) || '', altTitle: (m.title && m.title.romaji) || '',
     cover: (m.coverImage && (m.coverImage.extraLarge || m.coverImage.large)) || null,
     total: manga ? (m.chapters || null) : (m.episodes || null),
@@ -95,11 +156,17 @@ export async function searchTitles(kind, q, { popular = false, limit = 8 } = {})
     const j = await fetchJson(`${TVMAZE}/search/shows?q=${encodeURIComponent(term)}`);
     return (j || []).slice(0, limit).map(x => mapShow(x.show));
   }
+  if (kind === 'film' && TMDB_KEY) {
+    const [j, G] = await Promise.all([tmdb('/search/movie', { query: term, include_adult: 'false' }), movieGenres()]);
+    return (j.results || []).slice(0, limit).map(m => mapMovie(m, G));
+  }
+  const film = kind === 'film';
   const data = await anilist(SEARCH_Q, {
     search: term, type: kind === 'manga' ? 'MANGA' : 'ANIME', perPage: limit,
-    sort: popular ? ['SEARCH_MATCH', 'POPULARITY_DESC'] : ['SEARCH_MATCH']
+    sort: popular ? ['SEARCH_MATCH', 'POPULARITY_DESC'] : ['SEARCH_MATCH'],
+    formats: film ? ['MOVIE'] : null
   });
-  return ((data && data.Page && data.Page.media) || []).map(mapMedia);
+  return ((data && data.Page && data.Page.media) || []).map(m => mapMedia(m, film));
 }
 
 /**

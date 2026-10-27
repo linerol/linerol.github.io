@@ -14,10 +14,36 @@ service cloud.firestore {
     function role() { return get(memberPath()).data.role; }
     function isAdmin() { return isMember() && role() == 'admin'; }
     function isEditor() { return isMember() && role() in ['admin', 'editor']; }
+    // Un document rangé sous l'identifiant du compte, ou sous l'email (anciens documents)
+    function isMine(key) { return key == request.auth.uid || key == me(); }
 
     // Membres : toi seul gères la liste, chacun voit sa propre fiche
     match /members/{email} {
       allow read: if isAdmin() || (signedIn() && email == me());
+      allow write: if isAdmin();
+      // Chaque membre relie son compte et choisit son pseudo, rien d'autre
+      allow update: if signedIn() && email == me()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['uid', 'pseudo', 'pseudoKey'])
+        && request.resource.data.uid == request.auth.uid;
+    }
+
+    // Annuaire des pseudos : ce que les membres voient les uns des autres (jamais l'email).
+    // Un pseudo = un document : deux membres ne peuvent pas avoir le même.
+    match /pseudos/{key} {
+      allow read: if isMember();
+      allow create: if isMember() && key.matches('^[a-z0-9_-]{2,20}$')
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.key == key
+        && request.resource.data.pseudo is string && request.resource.data.pseudo.size() <= 20;
+      allow update: if isMember() && resource.data.uid == request.auth.uid
+        && request.resource.data.uid == request.auth.uid && request.resource.data.key == key
+        && request.resource.data.pseudo is string && request.resource.data.pseudo.size() <= 20;
+      allow delete: if isAdmin() || (isMember() && resource.data.uid == request.auth.uid);
+    }
+
+    // Réglages partagés (sites de la page « Où regarder ») : lus par les membres, modifiés par toi
+    match /settings/{id} {
+      allow read: if isMember();
       allow write: if isAdmin();
     }
 
@@ -27,15 +53,15 @@ service cloud.firestore {
       allow write: if isAdmin();
 
       // « Je l'ai vu aussi » : un document par membre, que lui seul modifie
-      match /seen/{email} {
+      match /seen/{who} {
         allow read: if isMember();
-        allow write: if isMember() && email == me();
+        allow write: if isMember() && isMine(who);
       }
     }
 
     // Titres suivis (« Me prévenir ») : privés à chaque membre
-    match /follows/{email} {
-      allow read, write: if isMember() && email == me();
+    match /follows/{who} {
+      allow read, write: if isMember() && isMine(who);
     }
 
     // Journal des membres et des accès : réservé à l'admin
@@ -47,18 +73,19 @@ service cloud.firestore {
     match /requests/{id} {
       allow read: if isMember();
       allow create: if isMember()
-        && request.resource.data.by == me()
+        && request.resource.data.by == request.auth.uid
         && request.resource.data.status == 'pending'
         && (request.resource.data.type == 'suggestion'
             || (request.resource.data.type == 'edit' && isEditor()));
       allow update: if isAdmin();
       allow delete: if isAdmin()
-        || (isMember() && resource.data.by == me() && resource.data.status == 'pending');
+        || (isMember() && isMine(resource.data.by) && resource.data.status == 'pending');
 
       // Votes : un document par votant
       match /votes/{voter} {
         allow read: if isMember();
-        allow create, delete: if isMember() && voter == me();
+        allow create: if isMember() && voter == request.auth.uid;
+        allow delete: if isMember() && isMine(voter);
       }
     }
 

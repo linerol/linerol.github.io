@@ -24,23 +24,34 @@ export const STATUSES = {
 export const STATUS_ORDER = ['cours', 'voir', 'pause', 'stop', 'fini'];
 
 export const KINDS = {
-  anime: { label: 'Animes', one: 'Anime', kanji: '動' },
-  manga: { label: 'Mangas', one: 'Manga', kanji: '漫' },
-  serie: { label: 'Séries', one: 'Série', kanji: '劇' }
+  anime: { label: 'Animes', one: 'Anime', pic: 'section-animes', hash: '#/animes' },
+  manga: { label: 'Mangas', one: 'Manga', pic: 'section-mangas', hash: '#/mangas' },
+  serie: { label: 'Séries', one: 'Série', pic: 'section-series', hash: '#/series' },
+  film:  { label: 'Films',  one: 'Film',  pic: 'section-films',  hash: '#/films' }
 };
+
+// Pictogramme de chaque statut (fichiers img/pictos/*.svg)
+export const STATUS_PIC = { cours: 'statut-en-cours', voir: 'statut-a-voir', pause: 'statut-en-pause', stop: 'statut-abandonne', fini: 'statut-termine' };
+// Un film se voit ou pas : trois statuts seulement, « Terminé » devient « Vu »
+export const FILM_STATUSES = ['voir', 'fini', 'stop'];
+export function statusLabel(s, kind, plural = false) {
+  if (kind === 'film' && s === 'fini') return 'Vu' + (plural ? 's' : '');
+  const st = STATUSES[s];
+  return st ? (plural ? st.plural : st.label) : '—';
+}
 
 // Associe les genres renvoyés par MyAnimeList ou TVmaze à une famille de couleur.
 const GENRE_MAP = [
   [/sports?/i, 'sport'],
   [/medical/i, 'medic'],
-  [/horror|gore|psychological|vampire/i, 'dark'],
-  [/crime|thriller|suspense|mystery|detective|espionage|legal/i, 'thril'],
-  [/histor|samurai|war|military/i, 'histo'],
-  [/isekai|fantasy|magic|reincarnation|game|supernatural/i, 'fanta'],
-  [/sci-?fi|science-fiction|mecha|space/i, 'scifi'],
-  [/romance|slice of life|drama|family|music/i, 'slice'],
-  [/comedy|gag|parody/i, 'comed'],
-  [/adventure/i, 'aven'],
+  [/horror|horreur|gore|psychological|vampire/i, 'dark'],
+  [/crime|thriller|suspense|mystery|myst[eè]re|detective|espionage|legal|policier/i, 'thril'],
+  [/histor|samurai|war\b|guerre|military/i, 'histo'],
+  [/isekai|fantasy|fantastique|magic|reincarnation|game|supernatural/i, 'fanta'],
+  [/sci-?fi|science-fiction|science fiction|mecha|space/i, 'scifi'],
+  [/romance|slice of life|drama|drame|family|familial|music|musique/i, 'slice'],
+  [/comedy|com[eé]die|gag|parody/i, 'comed'],
+  [/adventure|aventure|animation|western/i, 'aven'],
   [/action|martial|super ?power/i, 'shonen']
 ];
 export function familyFromGenres(genres = []) {

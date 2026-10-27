@@ -15,3 +15,7 @@ export const SITE_URL = location.origin + location.pathname.replace(/[^/]*$/, ''
 
 // Prénom affiché partout sur le site.
 export const OWNER = 'Linerol';
+
+// Clé API TMDB (v3) : recherche de films et plateformes françaises. Vide : films d'animation via AniList seulement.
+// Cette clé ne donne accès qu'à des données publiques de films : elle peut figurer dans le code du site.
+export const TMDB_KEY = 'd09010e7af582a0c037a004bf68a48b0';
