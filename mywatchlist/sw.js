@@ -1,7 +1,7 @@
 // Service worker minimal : rend la page installable et l'ouvre hors connexion.
 // Réseau d'abord pour nos propres fichiers, cache en secours. Firebase et les API ne passent jamais par ici.
 // Changer ce numéro à chaque mise en ligne : l'app propose alors « Nouvelle version disponible ».
-const CACHE = 'mywatchlist-v4';
+const CACHE = 'mywatchlist-v5';
 const SHELL = ['./', './index.html', './css/style.css', './js/app.js', './js/config.js', './js/data.js', './js/external.js', './js/firebase.js', './manifest.webmanifest', './icons/icon-192.png',
   './img/logo-tampon.png', './img/logo-signe.png', './img/logo-grave.png',
   ...['statut-en-cours', 'statut-a-voir', 'statut-en-pause', 'statut-abandonne', 'statut-termine', 'section-animes', 'section-mangas', 'section-series', 'section-films', 'action-valider', 'action-suggerer', 'action-plus-un'].map(n => `./img/pictos/${n}.svg`)];

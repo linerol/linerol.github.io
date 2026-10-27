@@ -6,15 +6,16 @@ const ANILIST = 'https://graphql.anilist.co';
 const TVMAZE = 'https://api.tvmaze.com';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// AniList limite le nombre de requêtes par minute : tout passe par une file espacée.
+// AniList limite le nombre de requêtes : 90 par minute en temps normal, 30 en ce moment (mode dégradé).
+// Tout passe donc par une file espacée de 2,1 s, soit moins de 30 requêtes par minute.
 let chain = Promise.resolve();
-function queued(fn, gap = 700) {
+function queued(fn, gap = 2100) {
   const run = chain.then(fn);
   chain = run.catch(() => {}).then(() => sleep(gap));
   return run;
 }
 
-async function anilist(query, variables, tries = 3) {
+async function anilist(query, variables, tries = 4) {
   return queued(async () => {
     for (let i = 0; i < tries; i++) {
       let res;
@@ -25,16 +26,19 @@ async function anilist(query, variables, tries = 3) {
           body: JSON.stringify({ query, variables })
         });
       } catch (e) {
-        if (i === tries - 1) throw new Error('AniList injoignable (réseau ou bloqueur de pub).');
-        await sleep(1500 * (i + 1));
+        // Un refus pour trop de requêtes arrive parfois sans en-têtes CORS : le navigateur le voit comme une erreur réseau
+        if (i === tries - 1) throw new Error('AniList injoignable (réseau, bloqueur de pub, ou trop de requêtes).');
+        await sleep(i === 0 ? 3000 : 20000 * i);
         continue;
       }
       if (res.status === 429) {
-        const wait = (+res.headers.get('Retry-After') || 5) * 1000;
-        await sleep(wait);
+        // Le blocage dure environ une minute
+        if (i === tries - 1) break;
+        const wait = (+res.headers.get('Retry-After') || 61) * 1000;
+        await sleep(Math.min(Math.max(wait, 5000), 65000));
         continue;
       }
-      if (res.status >= 500) { await sleep(1500 * (i + 1)); continue; }
+      if (res.status >= 500) { await sleep(3000 * (i + 1)); continue; }
       const j = await res.json().catch(() => ({}));
       if (!res.ok || j.errors) throw new Error('AniList : ' + ((j.errors && j.errors[0] && j.errors[0].message) || 'HTTP ' + res.status));
       return j.data;
