@@ -521,3 +521,5 @@ body { overflow-x: clip; }
   .poster img { transition: none; }
 }
 .note.row-between { display: flex; }
+.manual-preview { width: 140px; }
+.manual-preview .poster { box-shadow: 4px 4px 0 var(--shadow); }

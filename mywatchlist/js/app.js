@@ -27,7 +27,8 @@ const S = {
   login: { mode: 'login', msg: '', err: '', busy: false, email: '' },
   ui: { section: 'anime', status: 'all', fam: null, q: '', sort: 0, sheet: null, pick: null, rolls: 0, vfilter: 'all', confirm: null },
   draft: null,                 // brouillon de la fiche ouverte
-  add: { kind: 'anime', q: '', results: [], busy: false, err: '', chosen: null, note: '', status: 'voir' },
+  add: { kind: 'anime', q: '', results: [], busy: false, err: '', chosen: null, note: '', status: 'voir', manual: false },
+  manual: { title: '', genre: '', fam: 'aven', total: '', year: '', cover: '' },
   fix: { open: false, q: '', results: [], busy: false },
   newMember: { email: '', role: 'reader', msg: '', invite: '' },
   adminLog: [],
@@ -793,7 +794,9 @@ function viewTitle(id) {
           <h1 class="fiche-title">${esc(t.title)}</h1>
           <span class="small">${[m.year, m.altTitle && m.altTitle !== t.title ? m.altTitle : '', m.duration ? m.duration + ' min / ép.' : ''].filter(Boolean).map(esc).join(' · ')}</span>
           ${m.source === 'anilist' && m.extId ? `<a class="small ext" href="https://anilist.co/${t.kind === 'manga' ? 'manga' : 'anime'}/${esc(m.extId)}" target="_blank" rel="noopener">Voir sur AniList ↗</a>` : ''}
-          ${m.source === 'tmdb' && m.extId ? `<a class="small ext" href="https://www.themoviedb.org/movie/${esc(m.extId)}" target="_blank" rel="noopener">Voir sur TMDB ↗</a>` : ''}
+          ${m.source === 'tmdb' && m.extId ? `<a class="small ext" href="https://www.themoviedb.org/${m.tmdbType === 'tv' ? 'tv' : 'movie'}/${esc(m.extId)}" target="_blank" rel="noopener">Voir sur TMDB ↗</a>` : ''}
+          ${m.source === 'kitsu' && m.extId ? `<a class="small ext" href="https://kitsu.app/${t.kind === 'manga' ? 'manga' : 'anime'}/${esc(m.extId)}" target="_blank" rel="noopener">Voir sur Kitsu ↗</a>` : ''}
+          ${m.source === 'manual' ? `<span class="small">Créé à la main</span>` : ''}
           ${(m.source === 'mal' ? m.extId : m.malId) ? `<a class="small ext" href="https://myanimelist.net/${t.kind === 'manga' ? 'manga' : 'anime'}/${esc(m.source === 'mal' ? m.extId : m.malId)}" target="_blank" rel="noopener">Voir sur MyAnimeList ↗</a>` : ''}
           ${m.source === 'tvmaze' && m.extId ? `<a class="small ext" href="https://www.tvmaze.com/shows/${esc(m.extId)}" target="_blank" rel="noopener">Voir sur TVmaze ↗</a>` : ''}
         </div>
@@ -961,7 +964,8 @@ function resultRow(r, i, act, chosen) {
 function viewAdd() {
   const A = S.add, admin = isAdmin();
   const types = Object.keys(KINDS).map(k => `<button class="seg ${A.kind === k ? 'on' : ''}" data-act="addKind" data-kind="${k}" aria-pressed="${A.kind === k}">${pic(KINDS[k].pic)}${KINDS[k].one}</button>`).join('');
-  const source = A.kind === 'serie' ? 'TVMAZE' : A.kind === 'film' && hasTmdb() ? 'TMDB' : 'ANILIST';
+  const SRC = { kitsu: 'KITSU', tmdb: 'TMDB', anilist: 'ANILIST', tvmaze: 'TVMAZE' };
+  const source = A.results.length ? 'VIA ' + (SRC[A.results[0].source] || '') : '';
   const chosen = A.chosen !== null ? A.results[A.chosen] : null;
   const dup = chosen && findDuplicate(chosen);
 
@@ -982,8 +986,9 @@ function viewAdd() {
             <input id="addq" type="search" placeholder="Chercher ${{ serie: 'une série', manga: 'un manga', film: 'un film', anime: 'un anime' }[A.kind]}" value="${esc(A.q)}" data-in="addq" autocomplete="off">
           </label>
         </form>
-        <span class="mono muted small">${A.busy ? 'RECHERCHE…' : A.err ? esc(A.err) : A.results.length ? 'RÉSULTATS ' + source : A.kind === 'film' && !hasTmdb() ? 'Films d’animation uniquement pour l’instant. Tape au moins 2 lettres.' : 'Tape au moins 2 lettres.'}</span>
+        <span class="mono muted small">${A.busy ? 'RECHERCHE…' : A.err ? esc(A.err) : A.results.length ? 'RÉSULTATS ' + source : A.q.trim().length >= 2 && A.searched ? 'AUCUN RÉSULTAT.' : 'Tape au moins 2 lettres.'}</span>
         <div class="results">${A.results.map((r, i) => resultRow(r, i, 'addPick', A.chosen === i)).join('')}</div>
+        ${A.manual ? manualForm() : `<button class="link" data-act="openManual">${A.q.trim().length >= 2 ? `Tu ne le trouves pas ? Crée « ${esc(A.q.trim())} » à la main` : 'Créer un titre à la main'}</button>`}
         ${chosen ? `
           ${dup ? `<p class="note">« ${esc(dup.title)} » est déjà dans la liste (${esc(STATUSES[dup.status]?.label || '')}).</p>` : ''}
           ${admin ? `
@@ -1013,9 +1018,52 @@ function viewAdd() {
   </section>`;
 }
 
+/** Titre saisi à la main, quand aucune source ne le trouve (ou ne répond). */
+function manualForm() {
+  const A = S.add, M = S.manual, admin = isAdmin(), kind = A.kind;
+  const totalLabel = kind === 'manga' ? 'Nombre de chapitres' : 'Nombre d’épisodes';
+  const item = manualItem();
+  const dup = item.title && findDuplicate(item);
+  return `
+    <form class="panel stack" data-submit="addManual">
+      <div class="row-between"><b>${admin ? 'Créer' : 'Suggérer'} ${{ anime: 'un anime', manga: 'un manga', serie: 'une série', film: 'un film' }[kind]} à la main</b><button type="button" class="link" data-act="closeManual">Fermer</button></div>
+      <div class="field"><label for="m-title">Titre</label><input id="m-title" type="text" maxlength="120" value="${esc(M.title)}" data-in="manual" data-field="title" required></div>
+      <div class="two">
+        <div class="field"><label for="m-genre">Genre (facultatif)</label><input id="m-genre" type="text" maxlength="60" placeholder="Ex. : Fantasy · magie" value="${esc(M.genre)}" data-in="manual" data-field="genre"></div>
+        <div class="field"><label for="m-fam">Couleur de l’affiche</label>
+          <select id="m-fam" data-in="manual" data-field="fam">${Object.entries(FAMILIES).map(([k, v]) => `<option value="${k}" ${M.fam === k ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select></div>
+        ${kind === 'film' ? '' : `<div class="field"><label for="m-total">${totalLabel} (facultatif)</label><input id="m-total" type="number" inputmode="numeric" min="1" value="${esc(M.total)}" data-in="manual" data-field="total"></div>`}
+        <div class="field"><label for="m-year">Année (facultatif)</label><input id="m-year" type="number" inputmode="numeric" min="1900" max="2100" value="${esc(M.year)}" data-in="manual" data-field="year"></div>
+      </div>
+      <div class="field"><label for="m-cover">Adresse d’une image (facultatif)</label><input id="m-cover" type="url" placeholder="https://…" value="${esc(M.cover)}" data-in="manual" data-field="cover">
+        <span class="hint">Sans image, l’affiche prend la couleur choisie avec le titre écrit dessus. Tu pourras la corriger plus tard depuis la fiche.</span></div>
+      <div class="manual-preview">${poster({ id: 'apercu', title: M.title || 'Titre', kind, status: admin ? A.status : 'voir', fam: M.fam, cover: validUrl(M.cover) ? M.cover : null, genre: M.genre })}</div>
+      ${dup ? `<p class="note">« ${esc(dup.title)} » est déjà dans la liste.</p>` : ''}
+      ${admin ? `<div class="segs" role="group" aria-label="Statut de départ">${(kind === 'film' ? ['voir', 'fini'] : ['voir', 'cours', 'fini']).map(s => `<button type="button" class="seg ${A.status === s ? 'on' : ''}" data-act="addStatus" data-status="${s}">${statusPic(s)}${statusLabel(s, kind)}</button>`).join('')}</div>`
+        : `<div class="field"><label for="m-why">Pourquoi tu me le conseilles ?</label><textarea id="m-why" rows="2" maxlength="400" data-in="addNote">${esc(A.note)}</textarea></div>`}
+      <button class="btn btn-accent btn-lg" ${dup ? 'disabled' : ''}>${admin ? 'Ajouter à ma liste' : `Envoyer à ${OWNER}`}</button>
+    </form>`;
+}
+const validUrl = u => { try { return ['http:', 'https:'].includes(new URL(u).protocol); } catch (e) { return false; } };
+function manualItem() {
+  const M = S.manual, kind = S.add.kind, n = v => { const x = parseInt(v, 10); return x > 0 ? x : null; };
+  return {
+    title: M.title.trim(), altTitle: '', kind, source: 'manual', extId: null, malId: null,
+    cover: validUrl(M.cover.trim()) ? M.cover.trim() : null,
+    total: kind === 'film' ? null : n(M.total), duration: null, year: n(M.year),
+    genre: M.genre.trim(), fam: FAMILIES[M.fam] ? M.fam : 'aven', genres: M.genre.trim() ? [M.genre.trim()] : []
+  };
+}
+function cleanItem(item) {
+  const o = { title: item.title, altTitle: item.altTitle || '', kind: item.kind, cover: item.cover || null, source: item.source, extId: item.extId ?? null, malId: item.malId || null, total: item.total || null, duration: item.duration || null, year: item.year || null, genres: (item.genres || []).slice(0, 6) };
+  if (item.tmdbType) o.tmdbType = item.tmdbType;
+  if (item.source === 'manual') { o.genre = item.genre || ''; o.fam = item.fam; }
+  return o;
+}
+
 function findDuplicate(item) {
   const name = (item.title || '').toLowerCase();
-  return S.titles.find(t => (t.source === item.source && String(t.extId) === String(item.extId) && t.kind === item.kind)
+  return S.titles.find(t => (item.extId != null && t.source === item.source && String(t.extId) === String(item.extId) && t.kind === item.kind)
     || (t.kind === item.kind && ((t.title || '').toLowerCase() === name || (t.altTitle || '').toLowerCase() === (item.altTitle || '').toLowerCase() && item.altTitle)));
 }
 
@@ -1389,9 +1437,9 @@ function startListeners() {
 
 /* ------------------------------------------------------------------ données externes en arrière-plan */
 
-const META_KEYS = ['cover', 'source', 'extId', 'malId', 'total', 'duration', 'year', 'altTitle'];
+const META_KEYS = ['cover', 'source', 'tmdbType', 'extId', 'malId', 'total', 'duration', 'year', 'altTitle'];
 function metaFrom(r) { const o = {}; for (const k of META_KEYS) if (r[k] !== null && r[k] !== undefined && r[k] !== '') o[k] = r[k]; return o; }
-const META_CACHE = 'mw:meta2:';
+const META_CACHE = 'mw:meta3:';
 
 // Recherche des affiches en arrière-plan. S.meta = état affiché à l'admin.
 S.meta = { busy: false, done: 0, todo: 0, err: '' };
@@ -1415,7 +1463,7 @@ async function resolveMeta() {
           failures = 0;
         } catch (e) {
           failures++;
-          S.meta.err = e.message || String(e);
+          S.meta.err = (e.message || String(e)).replace(/ Tu peux créer le titre à la main\.$/, '');
           render();
           if (failures >= 3) break;          // le service est en panne : on s'arrête, le bouton permet de relancer
           await new Promise(r => setTimeout(r, 3000 * failures));
@@ -1447,23 +1495,23 @@ function scheduleRender() { clearTimeout(renderTimer); renderTimer = setTimeout(
 let airingBusy = false;
 async function loadAiring() {
   if (airingBusy) return;
-  const targets = S.titles.filter(t => t.kind === 'anime' && t.status === 'cours' && metaOf(t).extId && ['anilist', 'mal'].includes(metaOf(t).source));
-  const key = targets.map(t => t.id + ':' + metaOf(t).extId).sort().join(',');
+  const airKey = m => m.source === 'anilist' && m.extId ? 'al:' + m.extId : m.source === 'mal' && m.extId ? 'mal:' + m.extId : m.malId ? 'mal:' + m.malId : null;
+  const targets = S.titles.filter(t => t.kind === 'anime' && t.status === 'cours' && airKey(metaOf(t)));
+  const key = targets.map(t => t.id + ':' + airKey(metaOf(t))).sort().join(',');
   if (key === loadAiring.key) return;
   loadAiring.key = key;
   airingBusy = true;
   try {
     const ids = [], malIds = [];
     for (const t of targets) {
-      const m = metaOf(t);
-      if (m.source === 'anilist') ids.push(+m.extId); else malIds.push(+m.extId);
+      const k = airKey(metaOf(t));
+      if (k.startsWith('al:')) ids.push(+k.slice(3)); else malIds.push(+k.slice(4));
     }
     const next = await upcomingEpisodes(ids, malIds);
     const week = Date.now() + 7 * 86400e3;
     const out = [];
     for (const t of targets) {
-      const m = metaOf(t);
-      const n = next[(m.source === 'anilist' ? 'al:' : 'mal:') + m.extId];
+      const n = next[airKey(metaOf(t))];
       if (!n || n.airingAt * 1000 > week) continue;
       const d = new Date(n.airingAt * 1000);
       out.push({ id: t.id, title: t.title, at: d.getTime(), when: `ép. ${n.episode} · ` + d.toLocaleString('fr-FR', { weekday: 'short', hour: '2-digit', minute: '2-digit' }) });
@@ -1519,8 +1567,9 @@ function titleFromItem(item, status) {
   const today = todayISO();
   return {
     title: item.title, altTitle: item.altTitle || '', kind: item.kind, status,
-    genre: (item.genres || []).slice(0, 2).join(' · '), fam: familyFromGenres(item.genres || []),
-    cover: item.cover || null, source: item.source, extId: item.extId, malId: item.malId || null,
+    genre: item.genre || (item.genres || []).slice(0, 2).join(' · '), fam: item.fam || familyFromGenres(item.genres || []),
+    cover: item.cover || null, source: item.source, extId: item.extId ?? null, malId: item.malId || null,
+    ...(item.tmdbType ? { tmdbType: item.tmdbType } : {}),
     total: item.total || null, duration: item.duration || null, year: item.year || null,
     season: 1, episode: 0, chapter: 0, rating: null, review: '',
     startedAt: status === 'cours' || status === 'fini' ? today : '', finishedAt: status === 'fini' ? today : '',
@@ -1825,9 +1874,16 @@ const ACT = {
   },
 
   /* ajouter / suggérer */
-  addKind: el => { Object.assign(S.add, { kind: el.dataset.kind, results: [], chosen: null, err: '' }); render(); if (S.add.q.trim().length >= 2) runAddSearch(); },
+  addKind: el => { Object.assign(S.add, { kind: el.dataset.kind, results: [], chosen: null, err: '', searched: false }); render(); if (S.add.q.trim().length >= 2) runAddSearch(); },
   addPick: el => { S.add.chosen = +el.dataset.i; render(); },
   addStatus: el => { S.add.status = el.dataset.status; render(); },
+  openManual: () => {
+    S.add.manual = true; S.add.chosen = null;
+    if (!S.manual.title) S.manual.title = S.add.q.trim();
+    render();
+    const f = document.getElementById('m-title'); if (f) f.focus();
+  },
+  closeManual: () => { S.add.manual = false; render(); },
   addTitle: async el => {
     const item = S.add.results[S.add.chosen];
     if (!item) return;
@@ -1847,7 +1903,7 @@ const ACT = {
     if (!item) return;
     el.disabled = true;
     try {
-      const clean = { title: item.title, altTitle: item.altTitle || '', kind: item.kind, cover: item.cover || null, source: item.source, extId: item.extId, malId: item.malId || null, total: item.total || null, duration: item.duration || null, year: item.year || null, genres: (item.genres || []).slice(0, 6) };
+      const clean = cleanItem(item);
       await F.addDoc(F.collection(F.db, 'requests'), {
         type: 'suggestion', by: S.uid, byName: myName(), status: 'pending',
         createdAt: F.serverTimestamp(), item: clean, note: S.add.note.trim()
@@ -1986,6 +2042,28 @@ const SUBMIT = {
     S.myAccess = true;
   },
   addSearch: async () => { await runAddSearch(); },
+  addManual: async () => {
+    const item = manualItem(), A = S.add;
+    if (!item.title) { toast('Il faut au moins un titre.'); return; }
+    if (S.manual.cover.trim() && !item.cover) { toast('L’adresse de l’image doit commencer par https://'); return; }
+    if (findDuplicate(item)) { toast('Ce titre est déjà dans la liste.'); return; }
+    if (isAdmin()) {
+      const status = A.kind === 'film' && A.status === 'cours' ? 'voir' : A.status;
+      const b = F.writeBatch(F.db);
+      b.set(F.doc(F.collection(F.db, 'titles')), titleFromItem(item, status));
+      historyEntry(b, `${item.title} ajouté à la main (${statusLabel(status, item.kind)})`);
+      await b.commit();
+      toast(`${item.title} ajouté à ta liste.`);
+    } else {
+      await F.addDoc(F.collection(F.db, 'requests'), {
+        type: 'suggestion', by: S.uid, byName: myName(), status: 'pending',
+        createdAt: F.serverTimestamp(), item: cleanItem(item), note: A.note.trim()
+      });
+      toast(`${item.title} envoyé à ${OWNER}.`);
+    }
+    S.manual = { title: '', genre: '', fam: 'aven', total: '', year: '', cover: '' };
+    Object.assign(A, { manual: false, q: '', results: [], chosen: null, note: '', searched: false });
+  },
   fixSearch: async () => {
     const t = S.titles.find(x => x.id === S.draft.id);
     S.fix.busy = true; render();
@@ -2049,8 +2127,8 @@ async function runAddSearch() {
   try {
     const res = await searchTitles(A.kind, q, { limit: 8 });
     if (stamp !== runAddSearch.n) return;
-    A.results = res; A.chosen = null;
-  } catch (e) { A.err = errText(e); }
+    A.results = res; A.chosen = null; A.searched = true;
+  } catch (e) { A.err = errText(e); A.results = []; }
   A.busy = false; render();
 }
 
@@ -2059,6 +2137,7 @@ const INPUT = {
   q: el => { S.ui.q = el.value; render(); },
   addq: el => { S.add.q = el.value; clearTimeout(addTimer); addTimer = setTimeout(runAddSearch, 450); },
   addNote: el => { S.add.note = el.value; },
+  manual: el => { S.manual[el.dataset.field] = el.value; if (el.tagName === 'SELECT') render(); else scheduleRender(); },
   fixq: el => { S.fix.q = el.value; },
   nmEmail: el => { S.newMember.email = el.value; },
   pseudo: el => { S.profile.pseudo = el.value; },
