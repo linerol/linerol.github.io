@@ -61,6 +61,58 @@ export function familyFromGenres(genres = []) {
   return 'aven';
 }
 
+/* ---------- Genres ----------
+   Un catalogue commun aux animes, mangas, séries et films. Chaque genre appartient à une famille,
+   qui donne la couleur de l'affiche. L'admin peut en créer d'autres depuis la page Genres. */
+
+/** Clé stable d'un nom : minuscules, sans accents ni ponctuation. « Science-fiction » → « science-fiction ». */
+export function genreKey(name) {
+  return (name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/&/g, ' ').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+// [nom, famille] : genres, thèmes et publics courants des animes, mangas, séries et films
+export const DEFAULT_GENRES = [
+  ['Action', 'shonen'], ['Arts martiaux', 'shonen'], ['Combat', 'shonen'], ['Super-pouvoirs', 'shonen'], ['Super-héros', 'shonen'],
+  ['Ninja', 'shonen'], ['Shōnen', 'shonen'], ['Seinen', 'shonen'],
+  ['Aventure', 'aven'], ['Animation', 'aven'], ['Pirates', 'aven'], ['Voyage', 'aven'], ['Western', 'aven'], ['Jeunesse', 'aven'], ['Documentaire', 'aven'],
+  ['Fantasy', 'fanta'], ['Isekai', 'fanta'], ['Magie', 'fanta'], ['Surnaturel', 'fanta'], ['Réincarnation', 'fanta'], ['Jeu vidéo', 'fanta'], ['Mythologie', 'fanta'], ['Conte', 'fanta'],
+  ['Dark fantasy', 'dark'], ['Horreur', 'dark'], ['Gore', 'dark'], ['Psychologique', 'dark'], ['Démons', 'dark'], ['Vampires', 'dark'], ['Survie', 'dark'], ['Tragédie', 'dark'],
+  ['Thriller', 'thril'], ['Policier', 'thril'], ['Mystère', 'thril'], ['Enquête', 'thril'], ['Crime', 'thril'], ['Espionnage', 'thril'], ['Juridique', 'thril'], ['Suspense', 'thril'], ['Politique', 'thril'],
+  ['Historique', 'histo'], ['Samouraï', 'histo'], ['Guerre', 'histo'], ['Militaire', 'histo'], ['Biographie', 'histo'],
+  ['Sport', 'sport'], ['Football', 'sport'], ['Basket', 'sport'], ['Volley', 'sport'], ['Sports de combat', 'sport'], ['Course', 'sport'],
+  ['Romance', 'slice'], ['Tranche de vie', 'slice'], ['Drame', 'slice'], ['Shōjo', 'slice'], ['Josei', 'slice'], ['Musique', 'slice'], ['Idols', 'slice'],
+  ['École', 'slice'], ['Famille', 'slice'], ['Gastronomie', 'slice'],
+  ['Comédie', 'comed'], ['Parodie', 'comed'], ['Gag', 'comed'], ['Comédie romantique', 'comed'],
+  ['Médical', 'medic'],
+  ['Science-fiction', 'scifi'], ['Mecha', 'scifi'], ['Cyberpunk', 'scifi'], ['Espace', 'scifi'], ['Voyage temporel', 'scifi'], ['Post-apocalyptique', 'scifi'], ['Science', 'scifi']
+].map(([name, fam]) => ({ id: genreKey(name), name, fam }));
+
+// Genres renvoyés par Kitsu, AniList, TMDB et TVmaze (souvent en anglais) → noms du catalogue
+const SYN = {
+  'action-adventure': ['Action', 'Aventure'], adventure: ['Aventure'], comedy: ['Comédie'], drama: ['Drame'], horror: ['Horreur'],
+  mystery: ['Mystère'], psychological: ['Psychologique'], 'sci-fi': ['Science-fiction'], 'science-fiction': ['Science-fiction'],
+  'sci-fi-fantasy': ['Science-fiction', 'Fantasy'], 'science-fiction-fantastique': ['Science-fiction', 'Fantasy'], fantastique: ['Fantasy'],
+  'slice-of-life': ['Tranche de vie'], sports: ['Sport'], supernatural: ['Surnaturel'], music: ['Musique'], 'mahou-shoujo': ['Magie'],
+  magic: ['Magie'], family: ['Famille'], familial: ['Famille'], war: ['Guerre'], 'war-politics': ['Guerre', 'Politique'], 'guerre-politique': ['Guerre', 'Politique'],
+  history: ['Historique'], histoire: ['Historique'], historical: ['Historique'], documentary: ['Documentaire'], kids: ['Jeunesse'],
+  medical: ['Médical'], legal: ['Juridique'], 'martial-arts': ['Arts martiaux'], military: ['Militaire'], samurai: ['Samouraï'], space: ['Espace'],
+  'super-power': ['Super-pouvoirs'], superhero: ['Super-héros'], vampire: ['Vampires'], school: ['École'], shounen: ['Shōnen'], shonen: ['Shōnen'],
+  shoujo: ['Shōjo'], shojo: ['Shōjo'], game: ['Jeu vidéo'], 'video-game': ['Jeu vidéo'], 'time-travel': ['Voyage temporel'], survival: ['Survie'],
+  tragedy: ['Tragédie'], detective: ['Enquête'], espionage: ['Espionnage'], reincarnation: ['Réincarnation'], demons: ['Démons'], parody: ['Parodie'],
+  'gag-humor': ['Gag'], gourmet: ['Gastronomie'], cooking: ['Gastronomie'], 'post-apocalyptic': ['Post-apocalyptique'], mythology: ['Mythologie'],
+  'romantic-comedy': ['Comédie romantique'], romcom: ['Comédie romantique'], 'dark-fantasy': ['Dark fantasy'], politics: ['Politique'],
+  basketball: ['Basket'], soccer: ['Football'], volleyball: ['Volley'], racing: ['Course'], 'combat-sports': ['Sports de combat'], fighting: ['Combat'],
+  thriller: ['Thriller'], suspense: ['Suspense'], crime: ['Crime'], romance: ['Romance'], fantasy: ['Fantasy'], action: ['Action'], mecha: ['Mecha'],
+  isekai: ['Isekai'], idols: ['Idols'], 'idols-female': ['Idols'], 'idols-male': ['Idols'], seinen: ['Seinen'], josei: ['Josei'], western: ['Western'],
+  animation: ['Animation'], police: ['Policier'], psychologie: ['Psychologique'], jeux: ['Jeu vidéo'], surnaturelle: ['Surnaturel'], policiere: ['Policier'], cyberpunk: ['Cyberpunk'], gore: ['Gore'], ninja: ['Ninja'], pirates: ['Pirates'], science: ['Science']
+};
+/** Noms du catalogue correspondant à un genre venu d'une API (ou d'un ancien texte libre). */
+export function genreNamesFor(raw) {
+  const k = genreKey(raw);
+  return SYN[k] || [];
+}
+
 // Liste de départ : [titre affiché, genre, famille, statut, type, recherche API]
 export const SEED = [
   ['Blue Lock', 'Sport · football', 'sport', 'cours', 'anime', 'Blue Lock'],

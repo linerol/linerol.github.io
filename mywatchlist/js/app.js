@@ -1,5 +1,5 @@
 import * as F from './firebase.js';
-import { FAMILIES, STATUSES, STATUS_ORDER, KINDS, SEED, STATUS_PIC, FILM_STATUSES, statusLabel, familyFromGenres } from './data.js';
+import { FAMILIES, STATUSES, STATUS_ORDER, KINDS, SEED, STATUS_PIC, FILM_STATUSES, statusLabel, familyFromGenres, DEFAULT_GENRES, genreKey, genreNamesFor } from './data.js';
 import { searchTitles, upcomingEpisodes, watchProviders, hasTmdb } from './external.js';
 import { SITE_URL, OWNER } from './config.js';
 
@@ -16,10 +16,15 @@ const S = {
   prov: {},                    // titleId -> plateformes (TMDB)
   streaming: null,             // liens « Où regarder » choisis par l'admin
   newSite: { name: '', url: '', note: '' },
+  newBlocker: { name: '', url: '', note: '', where: 'pc' },
   flash: {}, lastUpdated: {},  // cartes qui viennent de changer
   update: false,               // nouvelle version du site prête
   online: navigator.onLine !== false,
+  histLimit: 150,              // nombre d'entrées d'historique chargées
   trash: [],                   // titres supprimés (admin), gardés 30 jours
+  genreDoc: null,              // catalogue des genres (settings/genres)
+  gq: {},                      // recherche dans le sélecteur de genres, par contexte
+  newGenre: { name: '', fam: 'aven', edit: null },
   titles: [], titlesReady: false,
   requests: [], votes: {},
   members: [], access: [], history: [],
@@ -27,10 +32,10 @@ const S = {
   localMeta: {},               // affiches trouvées pour les non-admins
   airing: [],
   login: { mode: 'login', msg: '', err: '', busy: false, email: '' },
-  ui: { section: 'anime', status: 'all', fam: null, q: '', sort: 0, sheet: null, pick: null, rolls: 0, vfilter: 'all', confirm: null },
+  ui: { section: 'anime', status: 'all', fam: null, genres: [], q: '', sort: 0, sheet: null, pick: null, rolls: 0, vfilter: 'all', confirm: null, histN: 15, logN: 10, mq: '', memberOpen: null, inviteOpen: false },
   draft: null,                 // brouillon de la fiche ouverte
   add: { kind: 'anime', q: '', results: [], busy: false, err: '', chosen: null, note: '', status: 'voir', manual: false },
-  manual: { title: '', genre: '', fam: 'aven', total: '', year: '', cover: '' },
+  manual: { title: '', genres: [], fam: 'aven', famManual: false, total: '', year: '', cover: '' },
   fix: { open: false, q: '', results: [], busy: false },
   newMember: { email: '', role: 'reader', msg: '', invite: '' },
   adminLog: [],
@@ -134,6 +139,61 @@ function whoLabel(uid, fallback) {
   const m = memberByUid(uid) || (isEmail(uid) && S.members.find(x => x.id === uid));
   return m ? `${m.pseudo || name} · ${m.id}` : name;
 }
+/* ---------- genres ---------- */
+const genreList = () => (S.genreDoc && Array.isArray(S.genreDoc.list) && S.genreDoc.list.length) ? S.genreDoc.list : DEFAULT_GENRES;
+let gIndexSrc = null, gIndex = null;
+function genreIndex() {
+  const list = genreList();
+  if (gIndexSrc !== list) {
+    gIndexSrc = list; gIndex = { byId: {}, byKey: {} };
+    for (const g of list) { gIndex.byId[g.id] = g; gIndex.byKey[genreKey(g.name)] = g; }
+  }
+  return gIndex;
+}
+const genreById = id => genreIndex().byId[id];
+const STOP = new Set(['de', 'du', 'des', 'le', 'la', 'les', 'et', 'en', 'a']);
+/** Genres du catalogue reconnus dans un texte libre ou un genre d'API. `left` reçoit les mots inconnus. */
+function matchGenres(raw, left) {
+  const I = genreIndex(), out = [];
+  const add = g => { if (g && !out.includes(g.id)) out.push(g.id); };
+  const viaKey = k => I.byKey[k] || null;
+  const viaSyn = txt => genreNamesFor(txt).map(n => I.byKey[genreKey(n)]).filter(Boolean);
+  for (const part of String(raw || '').split(/\s*(?:·|,|\/|&|\bet\b)\s*/i).map(x => x.trim()).filter(Boolean)) {
+    const whole = viaKey(genreKey(part)), syn = viaSyn(part);
+    if (whole) { add(whole); continue; }
+    if (syn.length) { syn.forEach(add); continue; }
+    // Mot à mot : « Dark fantasy historique » → Dark fantasy + Historique
+    const words = part.split(/[\s\-']+/).map(raw => ({ raw, key: genreKey(raw) })).filter(w => w.key && !STOP.has(w.key));
+    for (let i = 0; i < words.length; i++) {
+      const two = i + 1 < words.length ? words[i].key + '-' + words[i + 1].key : null;
+      const hit2 = two && (viaKey(two) || viaSyn(two)[0]);
+      if (hit2) { add(hit2); i++; continue; }
+      const w = words[i].key;
+      const hit = viaKey(w) || viaSyn(w)[0] || viaKey(w.replace(/(le|e|s)$/, '')) || viaKey(w.replace(/s$/, ''));
+      if (hit) add(hit); else if (left && w.length >= 4) left.push(words[i].raw);
+    }
+  }
+  return out;
+}
+function idsFromNames(names, left) {
+  const out = [];
+  for (const n of names || []) for (const id of matchGenres(n, left)) if (!out.includes(id)) out.push(id);
+  return out;
+}
+const legacyParts = t => String(t.genre || '').split(/\s*·\s*/).map(x => x.trim()).filter(Boolean);
+/** Identifiants de genres d'un titre (anciens titres : déduits du texte « genre »). */
+function genreIdsOf(t) { return Array.isArray(t.genres) ? t.genres.filter(id => genreById(id)) : idsFromNames(legacyParts(t)); }
+function genreNamesOf(t) { return Array.isArray(t.genres) ? genreIdsOf(t).map(id => genreById(id).name) : legacyParts(t); }
+function genreText(t) { const n = genreNamesOf(t); return n.length ? n.join(' · ') : famOf(t).name; }
+const famForGenres = (ids, fallback) => (ids.length && genreById(ids[0]) ? genreById(ids[0]).fam : fallback);
+const genreNamesText = ids => ids.map(id => genreById(id)?.name).filter(Boolean).join(' · ');
+/** Nombre de titres par genre (dans une liste de titres) */
+function genreCounts(titles) {
+  const c = {};
+  for (const t of titles) for (const id of genreIdsOf(t)) c[id] = (c[id] || 0) + 1;
+  return c;
+}
+
 function metaOf(t) { return Object.assign({}, S.localMeta[t.id] || {}, stripEmpty(t)); }
 function stripEmpty(o) { const r = {}; for (const k in o) if (o[k] !== null && o[k] !== undefined && o[k] !== '') r[k] = o[k]; return r; }
 function coverOf(t) { return t.cover || (S.localMeta[t.id] && S.localMeta[t.id].cover) || null; }
@@ -188,7 +248,7 @@ function route() {
   if (name === 'series') return { name: 'list', section: 'serie' };
   if (name === 'films') return { name: 'list', section: 'film' };
   if (name === 'titre' && id) return { name: 'title', id: decodeURIComponent(id) };
-  if (['ajouter', 'valider', 'membres', 'stats', 'avis', 'aide', 'profil', 'ou-regarder', 'corbeille'].includes(name)) return { name };
+  if (['ajouter', 'valider', 'membres', 'stats', 'avis', 'aide', 'profil', 'ou-regarder', 'corbeille', 'genres'].includes(name)) return { name };
   return { name: 'list' };
 }
 
@@ -224,6 +284,7 @@ function view() {
   else if (r.name === 'profil') main = viewProfile();
   else if (r.name === 'ou-regarder') main = viewWhere();
   else if (r.name === 'corbeille') main = isAdmin() ? viewTrash() : viewList();
+  else if (r.name === 'genres') main = isAdmin() ? viewGenres() : viewList();
   else main = viewList();
   return shell(r, main);
 }
@@ -256,15 +317,20 @@ function viewLogin() {
         ${create ? '' : '<button type="button" class="link" data-act="loginMode" data-mode="forgot">Mot de passe oublié ?</button>'}
       </form>`;
   }
+  // Téléphone : une colonne. Ordinateur : présentation à gauche, formulaire à droite.
   return `
-  <div class="solo"><div class="solo-in">
-    <img class="logo-signe" src="img/logo-signe.png" alt="Avatar de ${OWNER} avec son sceau" width="200" height="200">
-    <span class="mono muted">LA WATCHLIST DE ${OWNER.toUpperCase()}</span>
-    <h1 class="display">Watchlist<br>de ${OWNER}</h1>
-    <p class="muted">Les animes, mangas, séries et films de ${OWNER}. C’est un espace privé : on y entre sur invitation, avec l’email que ${OWNER} a autorisé.</p>
-    ${L.err ? `<p class="alert" role="alert">${esc(L.err)}</p>` : ''}
-    ${L.msg ? `<p class="note" role="status">${esc(L.msg)}</p>` : ''}
-    ${body}
+  <div class="solo solo-login"><div class="login-grid">
+    <div class="login-intro">
+      <img class="logo-signe" src="img/logo-signe.png" alt="Avatar de ${OWNER} avec son sceau" width="200" height="200">
+      <span class="mono muted">LA WATCHLIST DE ${OWNER.toUpperCase()}</span>
+      <h1 class="display">Watchlist<br>de ${OWNER}</h1>
+      <p class="muted">Les animes, mangas, séries et films de ${OWNER}. C’est un espace privé : on y entre sur invitation, avec l’email que ${OWNER} a autorisé.</p>
+    </div>
+    <div class="login-card stack">
+      ${L.err ? `<p class="alert" role="alert">${esc(L.err)}</p>` : ''}
+      ${L.msg ? `<p class="note" role="status">${esc(L.msg)}</p>` : ''}
+      ${body}
+    </div>
   </div></div>`;
 }
 
@@ -335,7 +401,7 @@ function shell(r, main) {
         <a href="#/" data-act="closeSheet">Liste</a>
         <a href="#/avis" data-act="closeSheet">Les avis de ${OWNER}</a>
         <a href="#/ajouter" data-act="closeSheet">${addLabel}</a>
-        ${admin ? `<a href="#/valider" data-act="closeSheet">À valider ${n ? `<span class="badge">${n}</span>` : ''}</a><a href="#/membres" data-act="closeSheet">Membres</a><a href="#/corbeille" data-act="closeSheet">Corbeille ${S.trash.length ? `<span class="mono muted">${S.trash.length}</span>` : ''}</a>` : ''}
+        ${admin ? `<a href="#/valider" data-act="closeSheet">À valider ${n ? `<span class="badge">${n}</span>` : ''}</a><a href="#/membres" data-act="closeSheet">Membres</a><a href="#/genres" data-act="closeSheet">Genres</a><a href="#/corbeille" data-act="closeSheet">Corbeille ${S.trash.length ? `<span class="mono muted">${S.trash.length}</span>` : ''}</a>` : ''}
         <a href="#/ou-regarder" data-act="closeSheet">Où regarder</a>
         <a href="#/stats" data-act="closeSheet">Stats et historique</a>
         <a href="#/profil" data-act="closeSheet">Mon profil</a>
@@ -377,7 +443,7 @@ function shell(r, main) {
 function filtered() {
   const U = S.ui, q = U.q.trim().toLowerCase();
   const inSec = S.titles.filter(t => t.kind === U.section);
-  const byFam = t => !U.fam || t.fam === U.fam;
+  const byFam = t => (!U.fam || t.fam === U.fam) && (!U.genres.length || U.genres.every(id => genreIdsOf(t).includes(id)));
   const byQ = t => !q || (t.title || '').toLowerCase().includes(q) || (t.altTitle || '').toLowerCase().includes(q);
   const base = inSec.filter(t => byFam(t) && byQ(t));
   const list = base.filter(t => U.status === 'all' || t.status === U.status);
@@ -424,7 +490,7 @@ function viewList() {
   const famCounts = Object.keys(FAMILIES).map(k => ({ k, n: inSec.filter(t => t.fam === k).length })).filter(x => x.n).sort((a, b) => b.n - a.n);
   const spectrum = famCounts.length ? `
     <div class="spectrum-wrap">
-      <div class="row-between mono muted small"><span>${own('MON SPECTRE', 'SON SPECTRE')} · clique un genre pour filtrer</span><span>Genre n°1 : ${esc(FAMILIES[famCounts[0].k].name)}</span></div>
+      <div class="row-between mono muted small"><span>${own('MON SPECTRE', 'SON SPECTRE')} · clique une couleur pour filtrer</span><span>Famille n°1 : ${esc(FAMILIES[famCounts[0].k].name)}</span></div>
       <div class="spectrum">${famCounts.map(x => {
         const f = FAMILIES[x.k], on = U.fam === x.k;
         return `<button class="spec ${on ? 'on' : ''} ${U.fam && !on ? 'dim' : ''}" style="flex:${x.n} 1 0;background:${f.color};color:${f.ink}" data-act="fam" data-fam="${x.k}" aria-pressed="${on}" title="${esc(f.name)} : ${x.n}">${x.n}</button>`;
@@ -434,11 +500,11 @@ function viewList() {
 
   // diffusion de la semaine
   const air = S.airing.filter(a => S.titles.some(t => t.id === a.id && t.kind === 'anime' && t.status === 'cours'));
-  const band = U.section === 'anime' ? `
+  const band = U.section === 'anime' && air.length ? `
     <div class="band">
       <div class="band-air">
         <span class="mono muted small">NOUVEAUX ÉPISODES CETTE SEMAINE · heure de Paris</span>
-        ${air.length ? `<ul class="air-list">${air.map(a => `<li><a href="#/titre/${encodeURIComponent(a.id)}"><b>${esc(a.title)}</b><span class="mono muted">${esc(a.when)}</span></a></li>`).join('')}</ul>` : `<span class="muted small">${S.airingDone ? own('Aucun de tes animes en cours n’est diffusé cette semaine.', `Aucun des animes que ${OWNER} suit n’est diffusé cette semaine.`) : 'Recherche des horaires de diffusion…'}</span>`}
+        <ul class="air-list">${air.map(a => `<li><a href="#/titre/${encodeURIComponent(a.id)}"><b>${esc(a.title)}</b><span class="mono muted">${esc(a.when)}</span></a></li>`).join('')}</ul>
       </div>
       ${pickBox()}
     </div>` : `<div class="band">${pickBox()}</div>`;
@@ -450,7 +516,7 @@ function viewList() {
     return `<button class="seg ${U.status === s ? 'on' : ''}" data-act="status" data-status="${s}" aria-pressed="${U.status === s}">${s === 'all' ? '' : statusPic(s)}${label} <span class="mono">${n}</span></button>`;
   }).join('');
 
-  const hasFilter = U.status !== 'all' || U.fam || U.q.trim();
+  const hasFilter = U.status !== 'all' || U.fam || U.genres.length || U.q.trim();
   const cards = list.map(card).join('');
 
   return `
@@ -478,16 +544,16 @@ function viewList() {
       <input id="q" type="search" placeholder="Chercher un titre" value="${esc(U.q)}" data-in="q" autocomplete="off">
     </label>
     <button class="btn btn-ghost" data-act="sort">Tri : ${SORTS[U.sort]}</button>
-    <button class="btn btn-ghost only-mobile" data-act="openFilters">Genres${U.fam ? ' · 1' : ''}</button>
+    <button class="btn btn-ghost" data-act="openFilters">Genres${U.genres.length ? ' · ' + U.genres.length : ''}</button>
   </div>
   <div class="segs segs-scroll" role="group" aria-label="Statut">${statusTabs}</div>
   <div class="row-between mono muted small result">
-    <span>${plural(list.length, 'titre affiché', 'titres affichés')}${U.fam ? ' · ' + esc(FAMILIES[U.fam].name) : ''}</span>
+    <span>${plural(list.length, 'titre affiché', 'titres affichés')}${U.fam ? ' · ' + esc(FAMILIES[U.fam].name) : ''}${U.genres.length ? ' · ' + esc(genreNamesText(U.genres)) : ''}</span>
     ${hasFilter ? `<button class="link" data-act="resetFilters">Tout réafficher</button>` : ''}
   </div>
   ${list.length ? `<div class="grid">${cards}</div>` : `
     <div class="empty"><img src="img/logo-grave.png" alt="" width="72" height="72"><p>${list.length || base.length || hasFilter ? 'Aucun titre ne correspond.' : `Aucun titre dans ${KINDS[U.section].label.toLowerCase()} pour l’instant.`}</p>${hasFilter ? `<button class="btn btn-ghost" data-act="resetFilters">Effacer les filtres</button>` : ''}</div>`}
-  ${S.ui.sheet === 'filters' ? filtersSheet(famCounts) : ''}
+  ${S.ui.sheet === 'filters' ? filtersSheet(inSec) : ''}
   ${statusLegend()}`;
 }
 
@@ -598,18 +664,32 @@ function favRow() {
 function activityBox() {
   const recent = S.history.filter(h => Date.now() - tsMillis(h.at) < 14 * 86400e3 && !/^Import/.test(h.text || '')).slice(0, 5);
   if (!recent.length) return '';
-  return `
-    <section class="activity" aria-label="Activité récente">
-      <span class="mono muted small">RÉCEMMENT CHEZ ${OWNER.toUpperCase()}</span>
-      <ul class="plain">${recent.map(h => `<li><span>${esc(h.text)}</span><span class="mono muted small">${fmtAgo(h.at)}</span></li>`).join('')}</ul>
-      <a class="link" href="#/stats">Tout l’historique</a>
-    </section>`;
+  return fold('recent', `Récemment chez ${OWNER}`, `
+      <ul class="plain activity-list">${recent.map(h => `<li><span>${esc(h.text)}</span><span class="mono muted small">${fmtAgo(h.at)}</span></li>`).join('')}</ul>
+      <a class="link" href="#/stats">Tout l’historique</a>`, { count: recent.length, cls: 'activity' });
 }
 
 function footer() {
   const last = Math.max(0, ...S.history.map(h => tsMillis(h.at)), ...S.titles.map(t => tsMillis(t.updatedAt)));
   return `<footer class="site-foot mono muted small"><span>Watchlist de ${OWNER}</span>${last ? `<span>Mise à jour le ${new Date(last).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })}</span>` : ''}</footer>`;
 }
+
+/**
+ * Encart repliable (« Récemment… », historique, journal). Replié par défaut ;
+ * l'appareil se souvient de l'état choisi.
+ */
+function fold(key, title, body, { count = null, cls = '' } = {}) {
+  const open = lsGet('mw:fold:' + key, false);
+  return `
+    <details class="fold ${cls}" data-fold="${key}" ${open ? 'open' : ''}>
+      <summary><span class="fold-title">${title}</span>${count !== null ? `<span class="fold-count mono">${count}</span>` : ''}<i class="fold-chev" aria-hidden="true"></i></summary>
+      <div class="fold-body">${body}</div>
+    </details>`;
+}
+document.addEventListener('toggle', e => {
+  const d = e.target;
+  if (d && d.matches && d.matches('details[data-fold]')) lsSet('mw:fold:' + d.dataset.fold, d.open);
+}, true);
 
 function lsGet(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } }
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* stockage indisponible */ } }
@@ -668,7 +748,7 @@ function viewReviews() {
     ${items.length ? `<div class="reviews">${items.map(t => `
       <a class="review" href="#/titre/${encodeURIComponent(t.id)}">
         <span class="review-poster">${poster(t, 'poster-sm')}</span>
-        <span class="review-text"><b class="h3">${esc(t.title)}</b><span class="muted small">${esc(KINDS[t.kind]?.one || '')} · ${esc(t.genre || famOf(t).name)}</span>${(t.review || '').trim() ? `<span class="review-quote">« ${esc(t.review.trim())} »</span>` : ''}</span>
+        <span class="review-text"><b class="h3">${esc(t.title)}</b><span class="muted small">${esc(KINDS[t.kind]?.one || '')} · ${esc(genreText(t))}</span>${(t.review || '').trim() ? `<span class="review-quote">« ${esc(t.review.trim())} »</span>` : ''}</span>
         <span class="review-score">${t.rating ? `<b>${t.rating}</b><small>/10</small>` : '<small>pas de note</small>'}</span>
       </a>`).join('')}</div>`
       : `<div class="empty"><img src="img/logo-grave.png" alt="" width="72" height="72"><p>${own('Tu n’as encore noté aucun titre. Note-les depuis leur fiche.', `${OWNER} n’a encore noté aucun titre ici.`)}</p></div>`}
@@ -695,7 +775,7 @@ function pickBox() {
   return `
     <div class="band-pick">
       <div class="row-between"><span class="mono muted small">${own('JE REGARDE QUOI CE SOIR ?', 'UNE IDÉE POUR CE SOIR ?')}</span>${S.ui.rolls > 1 ? `<span class="mono muted small">${S.ui.rolls}e tirage</span>` : ''}</div>
-      ${p ? `<a class="pick-title" href="#/titre/${encodeURIComponent(p.id)}">${esc(p.title)}</a><span class="muted small">${esc(p.genre || famOf(p).name)} · tiré parmi ${own('tes', 'ses')} À voir</span>` : `<span class="muted small">Un titre au hasard parmi ${own('tes', `les`)} « À voir »${own('', ` de ${OWNER}`)}${S.ui.fam ? ', dans le genre choisi' : ''}.</span>`}
+      ${p ? `<a class="pick-title" href="#/titre/${encodeURIComponent(p.id)}">${esc(p.title)}</a><span class="muted small">${esc(genreText(p))} · tiré parmi ${own('tes', 'ses')} À voir</span>` : `<span class="muted small">Un titre au hasard parmi ${own('tes', `les`)} « À voir »${own('', ` de ${OWNER}`)}${S.ui.fam || S.ui.genres.length ? ', dans les genres choisis' : ''}.</span>`}
       <div class="chips">
         <button class="btn btn-ink" data-act="roll">${p ? 'Relancer' : 'Tirer au sort'}</button>
         ${p ? `<button class="btn btn-ghost" data-act="clearPick">Effacer</button>` : ''}
@@ -704,15 +784,20 @@ function pickBox() {
     </div>`;
 }
 
-function filtersSheet(famCounts) {
+function filtersSheet(inSec) {
+  const counts = genreCounts(inSec), sel = S.ui.genres;
+  const used = Object.keys(counts).map(id => genreById(id)).filter(Boolean)
+    .sort((a, b) => counts[b.id] - counts[a.id] || a.name.localeCompare(b.name, 'fr'));
   return `
     <div class="sheet-bg" data-act="closeSheet"></div>
     <div class="sheet" role="dialog" aria-label="Filtres">
       <div class="row-between"><b class="h3">Genres</b><button class="link" data-act="closeSheet">Fermer</button></div>
-      <div class="chips">${famCounts.map(x => {
-        const f = FAMILIES[x.k], on = S.ui.fam === x.k;
-        return `<button class="fam-chip ${on ? 'on' : ''}" style="--c:${f.color};--ci:${f.ink}" data-act="fam" data-fam="${x.k}" aria-pressed="${on}">${esc(f.name)} · ${x.n}</button>`;
-      }).join('')}</div>
+      <p class="muted small">${sel.length > 1 ? 'Titres qui ont tous les genres choisis.' : `Les genres des ${KINDS[S.ui.section].label.toLowerCase()}. Choisis-en un ou plusieurs.`}</p>
+      <div class="chips">${used.map(g => {
+        const f = FAMILIES[g.fam] || FAMILIES.aven, on = sel.includes(g.id);
+        return `<button class="fam-chip ${on ? 'on' : ''}" style="--c:${f.color};--ci:${f.ink}" data-act="toggleGenre" data-id="${esc(g.id)}" aria-pressed="${on}">${esc(g.name)} · ${counts[g.id]}</button>`;
+      }).join('') || '<span class="muted small">Aucun genre dans cette section.</span>'}</div>
+      ${sel.length ? `<button class="link" data-act="clearGenres">Retirer les genres choisis</button>` : ''}
       <b class="h3">Tri</b>
       <div class="chips">${SORTS.map((s, i) => `<button class="seg ${S.ui.sort === i ? 'on' : ''}" data-act="setSort" data-sort="${i}">${s}</button>`).join('')}</div>
     </div>`;
@@ -726,7 +811,7 @@ function poster(t, cls = '') {
   const f = famOf(t), cover = coverOf(t), st = STATUSES[t.status] || STATUSES.voir;
   return `
     <span class="poster tone ${cls}" style="background-color:${f.color};color:${f.ink}">
-      <span class="poster-fam">${esc(f.name.toUpperCase())}</span>
+      <span class="poster-fam">${esc((genreNamesOf(t)[0] || f.name).toUpperCase())}</span>
       <span class="poster-title">${esc(t.title)}</span>
       ${cover ? `<img src="${esc(cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" class="${IMG_SEEN.has(cover) ? 'in' : ''}" onload="window.__imgIn(this)" onerror="this.remove()">` : ''}
       <span class="stamp st-${t.status}" aria-hidden="true">${statusPic(t.status)}</span>
@@ -755,7 +840,7 @@ function card(t) {
       <a class="card-link" href="#/titre/${encodeURIComponent(t.id)}" aria-label="${esc(t.title)}, ${statusLabel(t.status, t.kind)}">${poster(t)}</a>
       <div class="card-meta">
         <span class="card-title">${t.fav ? '<span class="fav-star" title="Coup de cœur">★</span> ' : ''}${esc(t.title)}</span>
-        <span class="muted small">${esc(t.genre || famOf(t).name)}</span>
+        <span class="muted small card-genre">${esc(genreText(t))}</span>
         ${foot}
       </div>
     </article>`;
@@ -763,12 +848,14 @@ function card(t) {
 
 /* ------------------------------------------------------------------ fiche */
 
-const EDIT_FIELDS = ['kind', 'status', 'season', 'episode', 'chapter', 'total', 'rating', 'review', 'startedAt', 'finishedAt', 'genre', 'fam'];
+const EDIT_FIELDS = ['kind', 'status', 'season', 'episode', 'chapter', 'total', 'rating', 'review', 'startedAt', 'finishedAt', 'genres', 'fam'];
 
 function ensureDraft(t) {
   if (!S.draft || S.draft.id !== t.id) {
     S.draft = { id: t.id };
     for (const k of EDIT_FIELDS) S.draft[k] = t[k] ?? (['season'].includes(k) ? 1 : ['episode', 'chapter'].includes(k) ? 0 : (k === 'rating' || k === 'total') ? null : '');
+    S.draft.genres = genreIdsOf(t);
+    S.draft.famManual = false;
     S.fix = { open: false, q: t.lookup || t.title, results: [], busy: false };
     S.ui.confirm = null;
     if (S.fixAfter === t.id) {
@@ -780,9 +867,17 @@ function ensureDraft(t) {
   return S.draft;
 }
 
+/** Ajoute le texte « genre » quand la liste de genres change (anciennes versions, historique). */
+const withGenreText = ch => (ch && Array.isArray(ch.genres) ? { ...ch, genre: genreNamesText(ch.genres) } : ch);
+
 function diffDraft(t) {
   const d = S.draft, changes = {}, before = {};
   for (const k of EDIT_FIELDS) {
+    if (k === 'genres') {
+      const a = genreIdsOf(t), b = d.genres || [];
+      if (JSON.stringify(a) !== JSON.stringify(b)) { changes.genres = b.slice(); before.genres = a; }
+      continue;
+    }
     const a = t[k] ?? null, b = d[k] === '' ? null : d[k];
     if ((a ?? '') !== (b ?? '') && !(a === null && b === '')) { changes[k] = b; before[k] = a; }
   }
@@ -835,7 +930,7 @@ function viewTitle(id) {
       <div class="fiche-head">
         <div class="fiche-cover">${poster(t, 'poster-sm')}</div>
         <div class="fiche-id">
-          <span class="mono small">${esc(KINDS[t.kind].one.toUpperCase())} · ${esc((t.genre || f.name).toUpperCase())}</span>
+          <span class="mono small">${esc(KINDS[t.kind].one.toUpperCase())} · ${esc(genreText(t).toUpperCase())}</span>
           <h1 class="fiche-title">${esc(t.title)}</h1>
           <span class="small">${[m.year, m.altTitle && m.altTitle !== t.title ? m.altTitle : '', m.duration ? m.duration + ' min / ép.' : ''].filter(Boolean).map(esc).join(' · ')}</span>
           ${m.source === 'anilist' && m.extId ? `<a class="small ext" href="https://anilist.co/${t.kind === 'manga' ? 'manga' : 'anime'}/${esc(m.extId)}" target="_blank" rel="noopener">Voir sur AniList ↗</a>` : ''}
@@ -895,10 +990,11 @@ function viewTitle(id) {
       </div>`}
 
       ${isEditor() ? `
-      <div class="two">
-        <div class="field"><label class="label" for="d-genre">GENRE</label><input id="d-genre" type="text" maxlength="60" value="${esc(d.genre)}" data-in="draft" data-field="genre"></div>
-        <div class="field"><label class="label" for="d-fam">COULEUR (FAMILLE)</label>
-          <select id="d-fam" data-in="draft" data-field="fam">${Object.entries(FAMILIES).map(([k, v]) => `<option value="${k}" ${d.fam === k ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select></div>
+      <div class="block">
+        <span class="label">GENRES</span>
+        ${genrePicker('draft', d.genres, true)}
+        <div class="field field-inline"><label for="d-fam">Couleur de l’affiche</label>
+          <select id="d-fam" data-in="draft" data-field="fam">${famOptions(d.fam)}</select></div>
       </div>` : ''}
 
       ${saveLabel ? `<button class="btn btn-ink btn-lg" data-act="saveTitle" data-id="${esc(t.id)}" ${dirty ? '' : 'disabled'}>${saveLabel}</button>` : ''}
@@ -1064,6 +1160,50 @@ function viewAdd() {
   </section>`;
 }
 
+const famOptions = cur => Object.entries(FAMILIES).map(([k, v]) => `<option value="${k}" ${cur === k ? 'selected' : ''}>${esc(v.name)}</option>`).join('');
+
+/** Puce d'un genre, à la couleur de sa famille */
+function genreChip(g, extra = '') {
+  const f = FAMILIES[g.fam] || FAMILIES.aven;
+  return `<span class="gchip" style="--c:${f.color}">${esc(g.name)}${extra}</span>`;
+}
+
+/**
+ * Sélecteur de genres. ctx : 'draft' (fiche) ou 'manual' (création à la main).
+ * Le premier genre donne la couleur de l'affiche ; l'admin peut créer un genre en le tapant.
+ */
+function genrePicker(ctx, ids, canEdit) {
+  const chips = ids.map(id => genreById(id)).filter(Boolean).map(g => genreChip(g, canEdit
+    ? `<button type="button" class="gchip-x" data-act="genreRemove" data-ctx="${ctx}" data-id="${esc(g.id)}" aria-label="Retirer ${esc(g.name)}">×</button>` : '')).join('');
+  if (!canEdit) return `<div class="gchips">${chips || '<span class="muted small">Aucun genre</span>'}</div>`;
+  const q = (S.gq[ctx] || '').trim(), key = genreKey(q);
+  const counts = genreCounts(S.titles);
+  const pool = genreList().filter(g => !ids.includes(g.id) && (!key || genreKey(g.name).includes(key)))
+    .sort((a, b) => (counts[b.id] || 0) - (counts[a.id] || 0) || a.name.localeCompare(b.name, 'fr'))
+    .slice(0, key ? 12 : 8);
+  const exact = key && genreList().some(g => genreKey(g.name) === key);
+  return `
+    <div class="gpicker">
+      <div class="gchips">${chips || '<span class="muted small">Aucun genre pour l’instant.</span>'}</div>
+      <label class="search search-sm" for="gq-${ctx}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        <input id="gq-${ctx}" type="search" placeholder="Ajouter un genre" value="${esc(S.gq[ctx] || '')}" data-in="genreQ" data-ctx="${ctx}" autocomplete="off">
+      </label>
+      <div class="gsugg">
+        ${pool.map(g => `<button type="button" class="gadd" style="--c:${(FAMILIES[g.fam] || FAMILIES.aven).color}" data-act="genreAdd" data-ctx="${ctx}" data-id="${esc(g.id)}">${esc(g.name)}</button>`).join('')}
+        ${key && !exact && isAdmin() ? `<button type="button" class="gadd gnew" data-act="genreCreateFrom" data-ctx="${ctx}">+ Créer « ${esc(q)} »</button>` : ''}
+        ${key && !pool.length && !isAdmin() ? `<span class="muted small">Aucun genre ne correspond. ${OWNER} peut en créer.</span>` : ''}
+      </div>
+      ${ids.length > 1 ? `<span class="hint">Le premier genre donne la couleur de l’affiche.</span>` : ''}
+    </div>`;
+}
+const pickerIds = ctx => (ctx === 'draft' ? S.draft.genres : S.manual.genres);
+function setPickerIds(ctx, ids) {
+  const o = ctx === 'draft' ? S.draft : S.manual;
+  o.genres = ids;
+  if (!o.famManual) o.fam = famForGenres(ids, o.fam);
+}
+
 /** Titre saisi à la main, quand aucune source ne le trouve (ou ne répond). */
 function manualForm() {
   const A = S.add, M = S.manual, admin = isAdmin(), kind = A.kind;
@@ -1075,15 +1215,15 @@ function manualForm() {
       <div class="row-between"><b>${admin ? 'Créer' : 'Suggérer'} ${{ anime: 'un anime', manga: 'un manga', serie: 'une série', film: 'un film' }[kind]} à la main</b><button type="button" class="link" data-act="closeManual">Fermer</button></div>
       <div class="field"><label for="m-title">Titre</label><input id="m-title" type="text" maxlength="120" value="${esc(M.title)}" data-in="manual" data-field="title" required></div>
       <div class="two">
-        <div class="field"><label for="m-genre">Genre (facultatif)</label><input id="m-genre" type="text" maxlength="60" placeholder="Ex. : Fantasy · magie" value="${esc(M.genre)}" data-in="manual" data-field="genre"></div>
+        <div class="field"><span class="field-label">Genres (facultatif)</span>${genrePicker('manual', M.genres, true)}</div>
         <div class="field"><label for="m-fam">Couleur de l’affiche</label>
-          <select id="m-fam" data-in="manual" data-field="fam">${Object.entries(FAMILIES).map(([k, v]) => `<option value="${k}" ${M.fam === k ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select></div>
+          <select id="m-fam" data-in="manual" data-field="fam">${famOptions(M.fam)}</select></div>
         ${kind === 'film' ? '' : `<div class="field"><label for="m-total">${totalLabel} (facultatif)</label><input id="m-total" type="number" inputmode="numeric" min="1" value="${esc(M.total)}" data-in="manual" data-field="total"></div>`}
         <div class="field"><label for="m-year">Année (facultatif)</label><input id="m-year" type="number" inputmode="numeric" min="1900" max="2100" value="${esc(M.year)}" data-in="manual" data-field="year"></div>
       </div>
       <div class="field"><label for="m-cover">Adresse d’une image (facultatif)</label><input id="m-cover" type="url" placeholder="https://…" value="${esc(M.cover)}" data-in="manual" data-field="cover">
         <span class="hint">Sans image, l’affiche prend la couleur choisie avec le titre écrit dessus. Tu pourras la corriger plus tard depuis la fiche.</span></div>
-      <div class="manual-preview">${poster({ id: 'apercu', title: M.title || 'Titre', kind, status: admin ? A.status : 'voir', fam: M.fam, cover: validUrl(M.cover) ? M.cover : null, genre: M.genre })}</div>
+      <div class="manual-preview">${poster({ id: 'apercu', title: M.title || 'Titre', kind, status: admin ? A.status : 'voir', fam: M.fam, cover: validUrl(M.cover) ? M.cover : null, genres: M.genres })}</div>
       ${dup ? `<p class="note">« ${esc(dup.title)} » est déjà dans la liste.</p>` : ''}
       ${admin ? `<div class="segs segs-fill" role="group" aria-label="Statut de départ">${(kind === 'film' ? ['voir', 'fini'] : ['voir', 'cours', 'fini']).map(s => `<button type="button" class="seg ${A.status === s ? 'on' : ''}" data-act="addStatus" data-status="${s}">${statusPic(s)}${statusLabel(s, kind)}</button>`).join('')}</div>`
         : `<div class="field"><label for="m-why">Pourquoi tu me le conseilles ?</label><textarea id="m-why" rows="2" maxlength="400" data-in="addNote">${esc(A.note)}</textarea></div>`}
@@ -1097,13 +1237,14 @@ function manualItem() {
     title: M.title.trim(), altTitle: '', kind, source: 'manual', extId: null, malId: null,
     cover: validUrl(M.cover.trim()) ? M.cover.trim() : null,
     total: kind === 'film' ? null : n(M.total), duration: null, year: n(M.year),
-    genre: M.genre.trim(), fam: FAMILIES[M.fam] ? M.fam : 'aven', genres: M.genre.trim() ? [M.genre.trim()] : []
+    genreIds: M.genres.slice(), genres: M.genres.map(id => genreById(id)?.name).filter(Boolean),
+    genre: genreNamesText(M.genres), fam: FAMILIES[M.fam] ? M.fam : 'aven'
   };
 }
 function cleanItem(item) {
   const o = { title: item.title, altTitle: item.altTitle || '', kind: item.kind, cover: item.cover || null, source: item.source, extId: item.extId ?? null, malId: item.malId || null, total: item.total || null, duration: item.duration || null, year: item.year || null, genres: (item.genres || []).slice(0, 6) };
   if (item.tmdbType) o.tmdbType = item.tmdbType;
-  if (item.source === 'manual') { o.genre = item.genre || ''; o.fam = item.fam; }
+  if (item.source === 'manual') { o.genre = item.genre || ''; o.fam = item.fam; o.genreIds = item.genreIds || []; }
   return o;
 }
 
@@ -1127,9 +1268,9 @@ function viewValidate() {
   const filters = [['all', 'Tout'], ['suggestion', 'Suggestions'], ['edit', 'Modifications'], ['access', 'Accès']]
     .map(([k, l]) => `<button class="seg ${f === k ? 'on' : ''}" data-act="vfilter" data-f="${k}">${l} <span class="mono">${n(k)}</span></button>`).join('');
 
-  const label = { kind: 'Type', status: 'Statut', season: 'Saison', episode: 'Épisode', chapter: 'Chapitre', total: 'Total', rating: 'Note', review: 'Avis', startedAt: 'Début', finishedAt: 'Fin', genre: 'Genre', fam: 'Couleur' };
+  const label = { genres: 'Genres', kind: 'Type', status: 'Statut', season: 'Saison', episode: 'Épisode', chapter: 'Chapitre', total: 'Total', rating: 'Note', review: 'Avis', startedAt: 'Début', finishedAt: 'Fin', genre: 'Genre', fam: 'Couleur' };
   const clip = v => v.length > 160 ? v.slice(0, 157).trimEnd() + '…' : v;
-  const show = (k, v) => v === null || v === undefined || v === '' ? '—' : k === 'status' ? (STATUSES[v]?.label || v) : k === 'kind' ? (KINDS[v]?.one || v) : k === 'fam' ? (FAMILIES[v]?.name || v) : k === 'rating' ? v + '/10' : clip(String(v));
+  const show = (k, v) => k === 'genres' ? (genreNamesText(v || []) || '—') : v === null || v === undefined || v === '' ? '—' : k === 'status' ? (STATUSES[v]?.label || v) : k === 'kind' ? (KINDS[v]?.one || v) : k === 'fam' ? (FAMILIES[v]?.name || v) : k === 'rating' ? v + '/10' : clip(String(v));
 
   const rows = items.map(x => {
     if (x.kind === 'access') {
@@ -1180,60 +1321,76 @@ function viewValidate() {
 /* ------------------------------------------------------------------ membres */
 
 function viewMembers() {
-  const N = S.newMember;
-  const rows = S.members.slice().sort((a, b) => (a.role === 'admin' ? -1 : b.role === 'admin' ? 1 : a.id.localeCompare(b.id))).map(m => {
-    const self = m.id === S.email;
-    const roleCell = m.role === 'admin' ? `<span class="admin-chip"><img src="img/logo-tampon.png" alt="" width="28" height="28">Admin</span>` : `
-      <div class="segs segs-fill" role="group" aria-label="Rôle de ${esc(m.id)}">
-        <button class="seg ${m.role === 'reader' ? 'on' : ''}" data-act="setRole" data-id="${esc(m.id)}" data-role="reader">Lecteur</button>
-        <button class="seg ${m.role === 'editor' ? 'on' : ''}" data-act="setRole" data-id="${esc(m.id)}" data-role="editor">Éditeur</button>
-      </div>`;
-    const action = self || m.role === 'admin' ? '' : S.ui.confirm === 'rm:' + m.id
-      ? `<button class="btn btn-danger" data-act="removeMember" data-id="${esc(m.id)}">Confirmer</button> <button class="link" data-act="cancelConfirm">Annuler</button>`
-      : `<button class="link danger-text" data-act="askConfirm" data-key="rm:${esc(m.id)}">Retirer</button>`;
-    const invite = self || m.role === 'admin' ? '' : `<button class="link" data-act="showInvite" data-id="${esc(m.id)}">Invitation</button> `;
+  const N = S.newMember, q = S.ui.mq.trim().toLowerCase();
+  const ROLE = { admin: 'Admin', editor: 'Éditeur', reader: 'Lecteur' };
+  const all = S.members.slice().sort((a, b) => (a.role === 'admin' ? -1 : b.role === 'admin' ? 1 : (a.pseudo || a.id).localeCompare(b.pseudo || b.id, 'fr')));
+  const list = q ? all.filter(m => (m.pseudo || '').toLowerCase().includes(q) || m.id.includes(q)) : all;
+  const counts = { editor: all.filter(m => m.role === 'editor').length, reader: all.filter(m => m.role === 'reader').length };
+  const inviteOpen = S.ui.inviteOpen || all.length <= 1 || !!N.msg;
+
+  // Une ligne compacte par membre ; on la touche pour voir son rôle et ses actions
+  const rows = list.map(m => {
+    const self = m.id === S.email, open = S.ui.memberOpen === m.id, editable = !self && m.role !== 'admin';
+    const status = [m.uid ? '' : 'pas encore connecté', m.addedAt ? 'ajouté le ' + new Date(tsMillis(m.addedAt)).toLocaleDateString('fr-FR') : ''].filter(Boolean).join(' · ');
     return `
-      <li class="member">
-        <div class="member-id">
-          <b>${esc(m.pseudo || 'Sans pseudo')}</b>
-          <span class="muted small wrap-any">${esc(m.id)}</span>
-          <span class="muted small">${[m.uid ? '' : 'pas encore connecté', m.addedAt ? 'ajouté le ' + new Date(tsMillis(m.addedAt)).toLocaleDateString('fr-FR') : ''].filter(Boolean).join(' · ')}</span>
-        </div>
-        <div class="member-role">${roleCell}</div>
-        ${invite || action ? `<div class="member-actions">${invite}${action}</div>` : ''}
+      <li class="member ${open ? 'open' : ''}">
+        <button class="member-head" ${editable ? `data-act="toggleMember" data-id="${esc(m.id)}" aria-expanded="${open}"` : 'disabled'}>
+          <span class="avatar avatar-sm">${esc((m.pseudo || m.id).charAt(0).toUpperCase())}</span>
+          <span class="member-id"><b>${esc(m.pseudo || 'Sans pseudo')}</b><span class="muted small wrap-any">${esc(m.id)}</span></span>
+          <span class="role-pill role-${m.role}">${ROLE[m.role] || m.role}</span>
+          ${editable ? '<i class="fold-chev" aria-hidden="true"></i>' : ''}
+        </button>
+        ${open ? `
+        <div class="member-body">
+          ${status ? `<span class="muted small">${esc(status)}</span>` : ''}
+          <div class="segs segs-fill" role="group" aria-label="Rôle de ${esc(m.pseudo || m.id)}">
+            <button class="seg ${m.role === 'reader' ? 'on' : ''}" data-act="setRole" data-id="${esc(m.id)}" data-role="reader" aria-pressed="${m.role === 'reader'}">Lecteur</button>
+            <button class="seg ${m.role === 'editor' ? 'on' : ''}" data-act="setRole" data-id="${esc(m.id)}" data-role="editor" aria-pressed="${m.role === 'editor'}">Éditeur</button>
+          </div>
+          <div class="chips">
+            <button class="btn btn-ghost" data-act="showInvite" data-id="${esc(m.id)}">Message d’invitation</button>
+            ${S.ui.confirm === 'rm:' + m.id
+              ? `<button class="btn btn-danger" data-act="removeMember" data-id="${esc(m.id)}">Oui, retirer l’accès</button><button class="link" data-act="cancelConfirm">Annuler</button>`
+              : `<button class="link danger-text" data-act="askConfirm" data-key="rm:${esc(m.id)}">Retirer l’accès</button>`}
+          </div>
+        </div>` : ''}
       </li>`;
   }).join('');
 
+  const log = S.adminLog.slice(0, S.ui.logN);
   return `
-  <section class="page">
-    <div class="page-head"><span class="kanji-red" aria-hidden="true">会員</span><h1 class="display-sm">Membres</h1><span class="mono muted">${plural(S.members.length, 'membre autorisé', 'membres autorisés')}</span></div>
+  <section class="page narrow">
+    <div class="page-head"><span class="kanji-red" aria-hidden="true">会員</span><h1 class="display-sm">Membres</h1>
+      <span class="mono muted">${plural(all.length, 'membre', 'membres')} · ${plural(counts.editor, 'éditeur', 'éditeurs')} · ${plural(counts.reader, 'lecteur', 'lecteurs')}</span></div>
     ${S.access.length ? `<a class="note" href="#/valider">${plural(S.access.length, 'demande d’accès attend', 'demandes d’accès attendent')} ta réponse →</a>` : ''}
+    ${inviteOpen ? `
     <form class="panel stack" data-submit="addMember">
-      <label for="nm-email"><b>Autoriser un email</b></label>
-      <div class="add-row">
-        <input id="nm-email" type="email" placeholder="ami@exemple.fr" value="${esc(N.email)}" data-in="nmEmail" autocomplete="off" required>
-        <div class="segs segs-fill" role="group" aria-label="Rôle">
-          <button type="button" class="seg ${N.role === 'reader' ? 'on' : ''}" data-act="nmRole" data-role="reader">Lecteur</button>
-          <button type="button" class="seg ${N.role === 'editor' ? 'on' : ''}" data-act="nmRole" data-role="editor">Éditeur</button>
-        </div>
-        <button class="btn btn-accent">Ajouter</button>
+      <div class="row-between"><label for="nm-email"><b>Inviter quelqu’un</b></label>${all.length > 1 ? `<button type="button" class="link" data-act="toggleInvite">Fermer</button>` : ''}</div>
+      <input id="nm-email" type="email" placeholder="ami@exemple.fr" value="${esc(N.email)}" data-in="nmEmail" autocomplete="off" required>
+      <div class="segs segs-fill" role="group" aria-label="Rôle">
+        <button type="button" class="seg ${N.role === 'reader' ? 'on' : ''}" data-act="nmRole" data-role="reader" aria-pressed="${N.role === 'reader'}">Lecteur</button>
+        <button type="button" class="seg ${N.role === 'editor' ? 'on' : ''}" data-act="nmRole" data-role="editor" aria-pressed="${N.role === 'editor'}">Éditeur</button>
       </div>
-      <span class="muted small">${esc(N.msg || 'La personne crée son mot de passe à sa première visite, puis vérifie son email.')}</span>
-    </form>
+      <span class="hint">${N.role === 'editor' ? 'Éditeur : tout ce que fait un lecteur, et propose des modifications que tu valides.' : 'Lecteur : voit la liste, dit ce qu’il a vu, suit des titres, suggère et vote.'}</span>
+      <button class="btn btn-accent">Autoriser cet email</button>
+      ${N.msg ? `<p class="note" role="status">${esc(N.msg)}</p>` : `<span class="muted small">La personne crée son mot de passe à sa première visite, puis vérifie son email.</span>`}
+    </form>` : `<button class="btn btn-accent" data-act="toggleInvite">+ Inviter quelqu’un</button>`}
     ${N.invite ? `
     <div class="panel stack invite">
-      <div class="row-between"><b>Message d’invitation pour ${esc(N.invite)}</b><button class="link" data-act="hideInvite">Fermer</button></div>
-      <textarea id="invite-text" rows="9" readonly>${esc(inviteText(N.invite))}</textarea>
-      <div class="chips"><button class="btn btn-ink" data-act="copyInvite">Copier le message</button><span class="muted small">Colle-le dans WhatsApp, un SMS ou un email : le site n’envoie rien tout seul.</span></div>
+      <div class="row-between"><b class="wrap-any">Message d’invitation pour ${esc(N.invite)}</b><button class="link" data-act="hideInvite">Fermer</button></div>
+      <textarea id="invite-text" rows="8" readonly>${esc(inviteText(N.invite))}</textarea>
+      <button class="btn btn-ink" data-act="copyInvite">Copier le message</button>
+      <span class="muted small">Colle-le dans WhatsApp, un SMS ou un email : le site n’envoie rien tout seul.</span>
     </div>` : ''}
-    <ul class="members">${rows}</ul>
-    <div class="two muted small">
-      <p><b>Lecteur</b> : voit la liste, marque ce qu’il a vu, suit des titres, suggère et vote.</p>
-      <p><b>Éditeur</b> : tout ce que fait un lecteur, et propose des modifications que tu valides.</p>
-    </div>
-    ${S.adminLog.length ? `
-    <h2 class="h3">Journal des membres</h2>
-    <ul class="plain small">${S.adminLog.slice(0, 20).map(l => `<li class="row-between"><span>${esc(l.text)}</span><span class="mono muted nowrap">${fmtWhen(l.at)}</span></li>`).join('')}</ul>` : ''}
+    ${all.length > 6 ? `
+    <label class="search" for="mq">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+      <input id="mq" type="search" placeholder="Chercher un pseudo ou un email" value="${esc(S.ui.mq)}" data-in="mq" autocomplete="off">
+    </label>` : ''}
+    <ul class="members">${rows || '<li class="muted small member-empty">Personne ne correspond.</li>'}</ul>
+    ${S.adminLog.length ? fold('memberlog', 'Journal des membres', `
+      <ul class="log">${log.map(l => `<li><span class="wrap-any">${esc(l.text)}</span><span class="mono muted small">${fmtWhen(l.at)}</span></li>`).join('')}</ul>
+      ${S.adminLog.length > log.length ? `<button class="btn btn-ghost" data-act="moreLog">Voir plus (${S.adminLog.length - log.length} de plus)</button>` : ''}`, { count: S.adminLog.length }) : ''}
   </section>`;
 }
 
@@ -1258,8 +1415,9 @@ function viewStats() {
       if (m.duration && tot) leftVoir += tot * m.duration; else unknown++;
     }
   }
-  const famCounts = Object.keys(FAMILIES).map(k => ({ k, n: T.filter(t => t.fam === k).length })).filter(x => x.n).sort((a, b) => b.n - a.n);
-  const max = famCounts[0]?.n || 1;
+  const gc = genreCounts(T);
+  const topGenres = Object.keys(gc).map(id => ({ g: genreById(id), n: gc[id] })).filter(x => x.g).sort((a, b) => b.n - a.n || a.g.name.localeCompare(b.g.name, 'fr')).slice(0, 12);
+  const max = topGenres[0]?.n || 1;
   const byKind = Object.keys(KINDS).map(k => T.filter(t => t.kind === k).length);
   const st = STATUS_ORDER.map(s => ({ s, n: T.filter(t => t.status === s).length })).filter(x => x.n);
   const years = {};
@@ -1276,12 +1434,12 @@ function viewStats() {
       <div class="tile"><span class="mono muted small">TEMPS DEVANT L’ÉCRAN</span><b class="tile-num">${hours ? '≈ ' + hours + ' h' : '— h'}</b><span class="muted small">${counted ? 'Estimation : épisodes vus × durée, sur ' + plural(counted, 'titre', 'titres') : 'Se calcule quand les durées sont connues.'}</span></div>
       <div class="tile"><span class="mono muted small">${own('IL TE RESTE', `IL RESTE À ${OWNER.toUpperCase()}`)}</span><b class="tile-num">${leftCours + leftVoir ? '≈ ' + fmtDuration(leftCours + leftVoir) : '—'}</b><span class="muted small">En cours : ${leftCours ? '≈ ' + fmtDuration(leftCours) : '—'} · À voir : ${leftVoir ? '≈ ' + fmtDuration(leftVoir) : '—'}${unknown ? ` · ${plural(unknown, 'titre', 'titres')} sans durée connue` : ''}</span></div>
       <div class="tile"><span class="mono muted small">TITRES SUIVIS</span><b class="tile-num">${T.length}</b><span class="muted small">${[plural(byKind[0], 'anime', 'animes'), plural(byKind[1], 'manga', 'mangas'), plural(byKind[2], 'série', 'séries'), plural(byKind[3], 'film', 'films')].join(' · ')}</span></div>
-      <div class="tile"><span class="mono muted small">GENRE PRÉFÉRÉ</span><b class="tile-num tile-word">${famCounts[0] ? esc(FAMILIES[famCounts[0].k].name) : '—'}</b><span class="muted small">${famCounts[0] ? famCounts[0].n + ' titres sur ' + T.length : ''}${avg ? ' · note moyenne ' + avg + '/10' : ''}</span></div>
+      <div class="tile"><span class="mono muted small">GENRE PRÉFÉRÉ</span><b class="tile-num tile-word">${topGenres[0] ? esc(topGenres[0].g.name) : '—'}</b><span class="muted small">${topGenres[0] ? topGenres[0].n + ' titres sur ' + T.length : ''}${avg ? ' · note moyenne ' + avg + '/10' : ''}</span></div>
     </div>
     <div class="two-wide">
       <div class="stack">
-        <h2 class="h3">Par genre</h2>
-        ${famCounts.map(x => `<div class="hbar"><span>${esc(FAMILIES[x.k].name)}</span><span class="hbar-track"><i style="width:${(x.n / max * 100).toFixed(1)}%;background:${FAMILIES[x.k].color}"></i></span><span class="mono right">${x.n}</span></div>`).join('')}
+        <h2 class="h3">Genres les plus présents</h2>
+        ${topGenres.map(x => `<div class="hbar"><span>${esc(x.g.name)}</span><span class="hbar-track"><i style="width:${(x.n / max * 100).toFixed(1)}%;background:${(FAMILIES[x.g.fam] || FAMILIES.aven).color}"></i></span><span class="mono right">${x.n}</span></div>`).join('')}
       </div>
       <div class="stack">
         <h2 class="h3">Par statut</h2>
@@ -1292,12 +1450,97 @@ function viewStats() {
           : `<p class="muted small panel-dash">Le graphique se remplit dès que tu renseignes les dates de fin dans les fiches.</p>`}
       </div>
     </div>
-    <div class="stack">
-      <h2 class="h3">Historique</h2>
-      ${S.history.length ? `<ul class="log">${S.history.map(h => `<li><span class="wrap-any">${esc(h.text)}</span><span class="mono muted small">${fmtWhen(h.at)} · ${esc(isEmail(h.byName) ? OWNER : (h.byName || OWNER))}</span></li>`).join('')}</ul>` : `<p class="muted small">Aucun changement enregistré pour l’instant.</p>`}
-      ${isAdmin() ? `<button class="btn btn-ghost" data-act="exportJson">Télécharger mes données (JSON)</button>` : ''}
-    </div>
+    ${fold('history', 'Historique', historyList(), { count: S.history.length + (S.history.length >= S.histLimit ? '+' : '') })}
+    ${isAdmin() ? `<button class="btn btn-ghost" data-act="exportJson">Télécharger mes données (JSON)</button>` : ''}
   </section>`;
+}
+
+/* ------------------------------------------------------------------ genres */
+
+/** Enregistre le catalogue de genres (réservé à l'admin). */
+function saveCatalog(list, b) {
+  const ref = F.doc(F.db, 'settings', 'genres');
+  if (b) b.set(ref, { list }); else return sent(F.setDoc(ref, { list }));
+}
+
+/**
+ * Passage à plusieurs genres par titre : une fois, à l'ouverture par l'admin.
+ * Le texte libre « genre » des anciens titres devient une liste de genres du catalogue ;
+ * les mots inconnus deviennent de nouveaux genres, dans la famille de couleur du titre.
+ */
+let genresMigrated = false;
+async function migrateGenres() {
+  if (genresMigrated || !isAdmin() || !S.titlesReady || !S.genreDoc) return;
+  genresMigrated = true;
+  const todo = S.titles.filter(t => !Array.isArray(t.genres));
+  const needCatalog = !(S.genreDoc.list && S.genreDoc.list.length);
+  if (!todo.length && !needCatalog) return;
+  let list = genreList().slice();
+  const b = F.writeBatch(F.db);
+  for (const t of todo) {
+    const left = [];
+    const ids = idsFromNames(legacyParts(t), left);
+    for (const raw of left) {
+      const id = genreKey(raw);
+      if (!list.some(g => g.id === id)) { list = [...list, { id, name: raw.charAt(0).toUpperCase() + raw.slice(1), fam: t.fam || 'aven' }]; S.genreDoc = { list }; }
+      if (!ids.includes(id)) ids.push(id);
+    }
+    b.update(F.doc(F.db, 'titles', t.id), { genres: ids, genre: genreNamesText(ids) || t.genre || '' });
+  }
+  S.genreDoc = { list };
+  saveCatalog(list, b);
+  try { await sent(b.commit()); } catch (e) { genresMigrated = false; }
+}
+
+function viewGenres() {
+  const counts = genreCounts(S.titles), N = S.newGenre, list = genreList();
+  const groups = Object.entries(FAMILIES).map(([k, f]) => ({ k, f, items: list.filter(g => g.fam === k).sort((a, b) => a.name.localeCompare(b.name, 'fr')) })).filter(x => x.items.length);
+  const editor = g => {
+    const n = counts[g.id] || 0;
+    return `
+      <form class="panel stack genre-edit" data-submit="saveGenre">
+        <div class="two">
+          <div class="field"><label for="eg-name">Nom</label><input id="eg-name" type="text" maxlength="30" value="${esc(N.editName)}" data-in="egName" required></div>
+          <div class="field"><label for="eg-fam">Famille (couleur)</label><select id="eg-fam" data-in="egFam">${famOptions(N.editFam)}</select></div>
+        </div>
+        <div class="chips">
+          <button class="btn btn-ink">Enregistrer</button>
+          <button type="button" class="btn btn-ghost" data-act="closeGenre">Annuler</button>
+          ${S.ui.confirm === 'genre:' + g.id
+            ? `<button type="button" class="btn btn-danger" data-act="deleteGenre" data-id="${esc(g.id)}">${n ? `Retirer de ${plural(n, 'titre', 'titres')} et supprimer` : 'Supprimer'}</button>`
+            : `<button type="button" class="link danger-text" data-act="askConfirm" data-key="genre:${esc(g.id)}">Supprimer ce genre</button>`}
+        </div>
+      </form>`;
+  };
+  return `
+  <section class="page narrow">
+    <div class="page-head"><span class="kanji-red" aria-hidden="true">分類</span><h1 class="display-sm">Genres</h1><span class="mono muted">${plural(list.length, 'genre', 'genres')} · communs aux animes, mangas, séries et films</span></div>
+    <p class="muted">Un titre peut avoir plusieurs genres. Chaque genre appartient à une famille, qui donne la couleur des affiches. Touche un genre pour le renommer, changer sa famille ou le supprimer.</p>
+    <form class="panel stack" data-submit="addGenre">
+      <b>Créer un genre</b>
+      <div class="two">
+        <div class="field"><label for="ng-name">Nom</label><input id="ng-name" type="text" maxlength="30" placeholder="Ex. : Cuisine" value="${esc(N.name)}" data-in="ngName" required></div>
+        <div class="field"><label for="ng-fam">Famille (couleur)</label><select id="ng-fam" data-in="ngFam">${famOptions(N.fam)}</select></div>
+      </div>
+      <button class="btn btn-accent">Créer</button>
+    </form>
+    ${groups.map(x => `
+    <section class="genre-group">
+      <h2 class="genre-fam"><i style="background:${x.f.color}"></i>${esc(x.f.name)}</h2>
+      <div class="gchips">${x.items.map(g => `<button type="button" class="gchip gchip-btn ${N.edit === g.id ? 'on' : ''}" style="--c:${x.f.color}" data-act="editGenre" data-id="${esc(g.id)}" aria-expanded="${N.edit === g.id}">${esc(g.name)}<span class="mono">${counts[g.id] || 0}</span></button>`).join('')}</div>
+      ${x.items.some(g => g.id === N.edit) ? editor(x.items.find(g => g.id === N.edit)) : ''}
+    </section>`).join('')}
+  </section>`;
+}
+
+/** Réécrit le texte « genre » des titres qui utilisent un genre renommé ou supprimé. */
+function retagTitles(b, list, id, drop) {
+  const users = S.titles.filter(t => genreIdsOf(t).includes(id)).map(t => ({ t, ids: genreIdsOf(t) }));
+  S.genreDoc = { list };
+  for (const { t, ids } of users) {
+    const next = drop ? ids.filter(x => x !== id) : ids;
+    b.update(F.doc(F.db, 'titles', t.id), { genres: next, genre: genreNamesText(next) });
+  }
 }
 
 /* ------------------------------------------------------------------ corbeille */
@@ -1347,6 +1590,27 @@ async function purgeTrash() {
   }
 }
 
+/** Historique groupé par jour, affiché par pages. */
+function historyList() {
+  if (!S.history.length) return `<p class="muted small">Aucun changement enregistré pour l’instant.</p>`;
+  const shown = S.history.slice(0, S.ui.histN);
+  const dayOf = h => { const ms = tsMillis(h.at) || Date.now(); return new Date(ms).toDateString(); };
+  const today = new Date().toDateString(), yesterday = new Date(Date.now() - 86400e3).toDateString();
+  const label = h => { const d = dayOf(h); return d === today ? 'Aujourd’hui' : d === yesterday ? 'Hier' : new Date(tsMillis(h.at)).toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' }); };
+  let out = '', last = null;
+  for (const h of shown) {
+    const d = dayOf(h);
+    if (d !== last) { out += `${last ? '</ul>' : ''}<h3 class="log-day mono muted small">${esc(label(h))}</h3><ul class="log">`; last = d; }
+    const who = isEmail(h.byName) ? OWNER : (h.byName || OWNER);
+    const time = tsMillis(h.at) ? new Date(tsMillis(h.at)).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : 'à l’instant';
+    out += `<li><span class="wrap-any">${esc(h.text)}</span><span class="mono muted small">${time} · ${esc(who)}</span></li>`;
+  }
+  out += '</ul>';
+  const more = S.history.length - shown.length;
+  return out + (more > 0 || S.history.length >= S.histLimit
+    ? `<button class="btn btn-ghost" data-act="moreHist">Voir plus${more > 0 ? ` (${more} de plus)` : ''}</button>` : '');
+}
+
 /* ------------------------------------------------------------------ profil */
 
 /** Clé unique d'un pseudo : minuscules, sans accents, espaces remplacés par des tirets. */
@@ -1384,7 +1648,7 @@ function viewProfile() {
 function viewWhere() {
   const sites = (S.streaming && S.streaming.sites) || [];
   const host = u => { try { return new URL(u).host.replace(/^www\./, ''); } catch (e) { return u; } };
-  const N = S.newSite;
+  const N = S.newSite, B = S.newBlocker, blockers = blockerList();
   return `
   <section class="page narrow">
     <div class="page-head"><span class="kanji-red" aria-hidden="true">配信</span><h1 class="display-sm">Où regarder</h1></div>
@@ -1415,24 +1679,54 @@ function viewWhere() {
     ${hasTmdb() ? `<p class="note">Sur chaque fiche, la rubrique « Où le regarder en France » donne aussi les plateformes officielles (Netflix, Crunchyroll, ADN…).</p>` : ''}
     <h2 class="h3">Bloquer les pubs</h2>
     <div class="two adblock">
+      ${[['pc', 'SUR ORDINATEUR'], ['mobile', 'SUR TÉLÉPHONE']].map(([where, label]) => `
       <div class="panel stack">
-        <span class="label">SUR ORDINATEUR</span>
-        <b>uBlock Origin</b>
-        <p class="small">Extension gratuite, la plus efficace. Sur Firefox : uBlock Origin. Sur Chrome et Edge : uBlock Origin Lite.</p>
-        <a class="link" href="https://ublockorigin.com/" target="_blank" rel="noopener">ublockorigin.com ↗</a>
-      </div>
-      <div class="panel stack">
-        <span class="label">SUR TÉLÉPHONE</span>
-        <b>Brave</b>
-        <p class="small">Navigateur gratuit pour iPhone et Android, avec un bloqueur intégré : rien à régler.</p>
-        <a class="link" href="https://brave.com/fr/" target="_blank" rel="noopener">brave.com ↗</a>
-        <b>AdGuard</b>
-        <p class="small">Pour garder Safari sur iPhone : installe AdGuard, puis active-le dans Réglages › Safari › Extensions.</p>
-        <a class="link" href="https://adguard.com/fr/" target="_blank" rel="noopener">adguard.com ↗</a>
-      </div>
+        <span class="label">${label}</span>
+        ${blockers.map((x, i) => ({ x, i })).filter(({ x }) => x.where === where).map(({ x, i }) => `
+        <div class="blocker ${x.star ? 'is-star' : ''}">
+          <div class="row-between"><b>${esc(x.name)}</b>${x.star ? `<span class="star-badge">★ ${own('Mon choix', `Le choix de ${OWNER}`)}</span>` : ''}</div>
+          ${x.note ? `<p class="small">${esc(x.note)}</p>` : ''}
+          <a class="link" href="${esc(x.url)}" target="_blank" rel="noopener">${esc(host(x.url))} ↗</a>
+          ${isAdmin() ? `<div class="chips">
+            <button class="btn btn-ghost btn-sm" data-act="starBlocker" data-i="${i}" aria-pressed="${!!x.star}">${x.star ? 'Retirer le ★' : 'Mettre en avant ★'}</button>
+            ${S.ui.confirm === 'blk:' + i
+              ? `<button class="btn btn-danger btn-sm" data-act="removeBlocker" data-i="${i}">Retirer</button><button class="link" data-act="cancelConfirm">Annuler</button>`
+              : `<button class="link danger-text" data-act="askConfirm" data-key="blk:${i}">Retirer</button>`}
+          </div>` : ''}
+        </div>`).join('') || '<p class="muted small">Aucun bloqueur pour l’instant.</p>'}
+      </div>`).join('')}
     </div>
+    ${isAdmin() ? `
+    <form class="panel stack" data-submit="addBlocker">
+      <b>Ajouter un bloqueur</b>
+      <div class="segs segs-fill" role="group" aria-label="Appareil">
+        <button type="button" class="seg ${B.where === 'pc' ? 'on' : ''}" data-act="blockerWhere" data-where="pc" aria-pressed="${B.where === 'pc'}">Ordinateur</button>
+        <button type="button" class="seg ${B.where === 'mobile' ? 'on' : ''}" data-act="blockerWhere" data-where="mobile" aria-pressed="${B.where === 'mobile'}">Téléphone</button>
+      </div>
+      <div class="two">
+        <div class="field"><label for="blk-name">Nom</label><input id="blk-name" type="text" maxlength="40" value="${esc(B.name)}" data-in="blkName" required></div>
+        <div class="field"><label for="blk-url">Adresse</label><input id="blk-url" type="url" placeholder="https://…" value="${esc(B.url)}" data-in="blkUrl" required></div>
+      </div>
+      <div class="field"><label for="blk-note">Un mot (facultatif)</label><input id="blk-note" type="text" maxlength="140" placeholder="Ex. : extension pour Chrome, rien à régler" value="${esc(B.note)}" data-in="blkNote"></div>
+      <button class="btn btn-ink">Ajouter</button>
+    </form>` : ''}
     <p class="small muted">Certaines fenêtres s’ouvrent quand même au clic sur la vidéo : ferme l’onglet ouvert et reviens sur la vidéo.</p>
   </section>`;
+}
+
+// Bloqueurs proposés tant que l'admin n'a pas personnalisé la liste
+const DEFAULT_BLOCKERS = [
+  { name: 'Adblock Plus', url: 'https://adblockplus.org/fr/', where: 'pc', star: true, note: 'Extension gratuite pour Google Chrome (existe aussi pour Firefox et Edge). Une fois installée, rien à régler.' },
+  { name: 'uBlock Origin', url: 'https://ublockorigin.com/', where: 'pc', note: 'Très efficace sur Firefox. Sur Chrome et Edge : uBlock Origin Lite.' },
+  { name: 'Brave', url: 'https://brave.com/fr/', where: 'mobile', note: 'Navigateur gratuit pour iPhone et Android, avec un bloqueur intégré.' },
+  { name: 'AdGuard', url: 'https://adguard.com/fr/', where: 'mobile', note: 'Pour garder Safari sur iPhone : installe AdGuard, puis active-le dans Réglages › Safari › Extensions.' }
+];
+const blockerList = () => (S.streaming && Array.isArray(S.streaming.adblockers) ? S.streaming.adblockers : DEFAULT_BLOCKERS);
+/** Enregistre la page « Où regarder » (sites et bloqueurs) sans écraser l'autre moitié. */
+function saveStreaming(patch) {
+  const cur = { sites: (S.streaming && S.streaming.sites) || [], adblockers: blockerList() };
+  S.streaming = { ...cur, ...patch };
+  return sent(F.setDoc(F.doc(F.db, 'settings', 'streaming'), S.streaming));
 }
 
 /* ------------------------------------------------------------------ authentification */
@@ -1442,7 +1736,7 @@ F.onAuthStateChanged(F.auth, async user => {
   S.user = user; S.member = null; S.role = null; S.titles = []; S.titlesReady = false;
   S.requests = []; S.members = []; S.access = []; S.history = []; S.airing = []; S.airingDone = false;
   S.adminLog = []; S.seen = {}; S.follows = null; S.welcomeOpen = false;
-  S.names = {}; S.pseudoKeys = {}; S.prov = {}; S.streaming = null; S.flash = {}; S.lastUpdated = {}; S.trash = [];
+  S.names = {}; S.pseudoKeys = {}; S.prov = {}; S.streaming = null; S.flash = {}; S.lastUpdated = {}; S.trash = []; S.genreDoc = null; genresMigrated = false;
   S.login.err = ''; S.login.busy = false;
   if (!user) { S.phase = 'login'; return render(); }
   S.email = (user.email || '').toLowerCase();
@@ -1483,6 +1777,17 @@ function stopListeners() { S.unsub.forEach(u => u()); S.unsub = []; }
 
 function onListenErr(e) { console.error(e); toast(errText(e)); }
 
+// L'historique se charge par tranches : on en demande plus quand on a tout affiché
+let historyUnsub = null;
+function subscribeHistory() {
+  if (historyUnsub) historyUnsub();
+  historyUnsub = F.onSnapshot(F.query(F.collection(F.db, 'history'), F.orderBy('at', 'desc'), F.limit(S.histLimit)), snap => {
+    S.history = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    render();
+  }, onListenErr);
+  S.unsub.push(() => { if (historyUnsub) { historyUnsub(); historyUnsub = null; } });
+}
+
 function startListeners() {
   S.unsub.push(F.onSnapshot(F.collection(F.db, 'titles'), snap => {
     const now = Date.now(), first = !S.titlesReady;
@@ -1494,6 +1799,7 @@ function startListeners() {
     }
     if (!first) setTimeout(scheduleRender, 1700);
     S.titlesReady = true;
+    migrateGenres();
     render();
     resolveMeta();
     loadAiring();
@@ -1503,15 +1809,17 @@ function startListeners() {
     render();
     refreshVotes();
   }, onListenErr));
-  S.unsub.push(F.onSnapshot(F.query(F.collection(F.db, 'history'), F.orderBy('at', 'desc'), F.limit(150)), snap => {
-    S.history = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    render();
-  }, onListenErr));
+  subscribeHistory();
   S.unsub.push(F.onSnapshot(F.collection(F.db, 'pseudos'), snap => {
     S.names = {}; S.pseudoKeys = {};
     for (const d of snap.docs) { const v = d.data(); if (v.uid) { S.names[v.uid] = v.pseudo; S.pseudoKeys[v.uid] = d.id; } }
     render();
   }, onListenErr));
+  S.unsub.push(F.onSnapshot(F.doc(F.db, 'settings', 'genres'), d => {
+    S.genreDoc = d.exists() ? d.data() : { list: null };
+    migrateGenres();
+    render();
+  }, () => { S.genreDoc = { list: null }; }));
   S.unsub.push(F.onSnapshot(F.doc(F.db, 'settings', 'streaming'), d => {
     S.streaming = d.exists() ? d.data() : { sites: [] };
     render();
@@ -1680,7 +1988,10 @@ function titleFromItem(item, status) {
   const today = todayISO();
   return {
     title: item.title, altTitle: item.altTitle || '', kind: item.kind, status,
-    genre: item.genre || (item.genres || []).slice(0, 2).join(' · '), fam: item.fam || familyFromGenres(item.genres || []),
+    ...(() => {
+      const ids = Array.isArray(item.genreIds) ? item.genreIds : idsFromNames(item.genres || []).slice(0, 5);
+      return { genres: ids, genre: genreNamesText(ids), fam: item.fam || famForGenres(ids, familyFromGenres(item.genres || [])) };
+    })(),
     cover: item.cover || null, source: item.source, extId: item.extId ?? null, malId: item.malId || null,
     ...(item.tmdbType ? { tmdbType: item.tmdbType } : {}),
     total: item.total || null, duration: item.duration || null, year: item.year || null,
@@ -1697,6 +2008,7 @@ function describeChanges(name, changes, before) {
     const a = before[k], b = changes[k];
     if (k === 'status') parts.push(`${statusLabel(a, changes.kind || before.kind)} → ${statusLabel(b, changes.kind || before.kind)}`);
     else if (k === 'kind') parts.push(`type ${KINDS[a]?.one || '—'} → ${KINDS[b]?.one || '—'}`);
+    else if (k === 'genres') parts.push(`genres : ${genreNamesText(b || []) || 'aucun'}`);
     else if (k === 'rating') parts.push(b ? `noté ${b}/10` : 'note retirée');
     else if (k === 'review') parts.push('avis modifié');
     else if (k === 'fam') parts.push(`couleur ${FAMILIES[b]?.name || b}`);
@@ -1738,9 +2050,9 @@ const ACT = {
   fam: el => { S.ui.fam = S.ui.fam === el.dataset.fam ? null : el.dataset.fam; render(); },
   sort: () => { S.ui.sort = (S.ui.sort + 1) % SORTS.length; render(); },
   setSort: el => { S.ui.sort = +el.dataset.sort; render(); },
-  resetFilters: () => { Object.assign(S.ui, { status: 'all', fam: null, q: '' }); render(); },
+  resetFilters: () => { Object.assign(S.ui, { status: 'all', fam: null, genres: [], q: '' }); render(); },
   roll: () => {
-    const pool = S.titles.filter(t => t.kind === S.ui.section && t.status === 'voir' && (!S.ui.fam || t.fam === S.ui.fam));
+    const pool = S.titles.filter(t => t.kind === S.ui.section && t.status === 'voir' && (!S.ui.fam || t.fam === S.ui.fam) && S.ui.genres.every(id => genreIdsOf(t).includes(id)));
     if (!pool.length) return toast('Aucun titre « À voir » dans cette sélection.');
     let p = pool[Math.floor(Math.random() * pool.length)];
     if (pool.length > 1 && p.id === S.ui.pick) p = pool.find(x => x.id !== S.ui.pick);
@@ -1934,7 +2246,7 @@ const ACT = {
       if (isAdmin()) {
         const kindChanged = 'kind' in changes;
         const b = F.writeBatch(F.db);
-        b.update(F.doc(F.db, 'titles', t.id), { ...changes, ...(kindChanged ? { total: changes.total ?? null } : {}), updatedAt: F.serverTimestamp() });
+        b.update(F.doc(F.db, 'titles', t.id), { ...withGenreText(changes), ...(kindChanged ? { total: changes.total ?? null } : {}), updatedAt: F.serverTimestamp() });
         historyEntry(b, describeChanges(t.title, changes, before));
         await sent(b.commit());
         S.draft = null;
@@ -2063,7 +2375,7 @@ const ACT = {
     try {
       const b = F.writeBatch(F.db);
       const kindChanged = r.changes && 'kind' in r.changes;
-      b.update(F.doc(F.db, 'titles', t.id), { ...r.changes, ...(kindChanged ? { total: r.changes.total ?? null } : {}), updatedAt: F.serverTimestamp() });
+      b.update(F.doc(F.db, 'titles', t.id), { ...withGenreText(r.changes), ...(kindChanged ? { total: r.changes.total ?? null } : {}), updatedAt: F.serverTimestamp() });
       b.update(F.doc(F.db, 'requests', r.id), { status: 'accepted', decidedAt: F.serverTimestamp() });
       historyEntry(b, describeChanges(t.title, r.changes, r.before || {}) + ` (proposé par ${displayName(r.by, r.byName)})`);
       await sent(b.commit());
@@ -2117,6 +2429,69 @@ const ACT = {
   },
 
   applyUpdate: () => applyUpdate(),
+  genreAdd: el => {
+    const ctx = el.dataset.ctx, ids = pickerIds(ctx);
+    if (!ids.includes(el.dataset.id)) setPickerIds(ctx, [...ids, el.dataset.id]);
+    S.gq[ctx] = '';
+    render();
+  },
+  genreRemove: el => { const ctx = el.dataset.ctx; setPickerIds(ctx, pickerIds(ctx).filter(x => x !== el.dataset.id)); render(); },
+  genreCreateFrom: async el => {
+    const ctx = el.dataset.ctx, name = (S.gq[ctx] || '').trim().replace(/\s+/g, ' ').slice(0, 30), id = genreKey(name);
+    if (!id) return;
+    const holder = ctx === 'draft' ? S.draft : S.manual;
+    const list = genreList().some(g => g.id === id) ? genreList() : [...genreList(), { id, name: name.charAt(0).toUpperCase() + name.slice(1), fam: holder.fam || 'aven' }];
+    S.genreDoc = { list };
+    setPickerIds(ctx, [...pickerIds(ctx).filter(x => x !== id), id]);
+    S.gq[ctx] = '';
+    render();
+    try { await saveCatalog(list); toast(`Genre « ${name} » créé.`); } catch (e) { toast(errText(e)); }
+  },
+  toggleGenre: el => {
+    const id = el.dataset.id, g = S.ui.genres;
+    S.ui.genres = g.includes(id) ? g.filter(x => x !== id) : [...g, id];
+    render();
+  },
+  clearGenres: () => { S.ui.genres = []; render(); },
+  editGenre: el => {
+    const g = genreById(el.dataset.id);
+    if (!g) return;
+    Object.assign(S.newGenre, S.newGenre.edit === g.id ? { edit: null } : { edit: g.id, editName: g.name, editFam: g.fam });
+    S.ui.confirm = null;
+    render();
+  },
+  closeGenre: () => { S.newGenre.edit = null; render(); },
+  deleteGenre: async el => {
+    const id = el.dataset.id, g = genreById(id);
+    if (!g) return;
+    try {
+      const list = genreList().filter(x => x.id !== id);
+      const b = F.writeBatch(F.db);
+      retagTitles(b, list, id, true);
+      saveCatalog(list, b);
+      historyEntry(b, `Genre « ${g.name} » supprimé`);
+      await sent(b.commit());
+      S.newGenre.edit = null; S.ui.confirm = null;
+      toast(`Genre « ${g.name} » supprimé.`);
+    } catch (e) { toast(errText(e)); }
+  },
+  blockerWhere: el => { S.newBlocker.where = el.dataset.where; render(); },
+  starBlocker: async el => {
+    const i = +el.dataset.i, list = blockerList().map((x, j) => (j === i ? { ...x, star: !x.star } : x));
+    try { await saveStreaming({ adblockers: list }); } catch (e) { toast(errText(e)); }
+  },
+  removeBlocker: async el => {
+    const i = +el.dataset.i, list = blockerList().filter((_, j) => j !== i);
+    try { await saveStreaming({ adblockers: list }); S.ui.confirm = null; toast('Bloqueur retiré.'); } catch (e) { toast(errText(e)); }
+  },
+  moreHist: () => {
+    S.ui.histN += 30;
+    if (S.ui.histN > S.history.length && S.history.length >= S.histLimit) { S.histLimit += 150; subscribeHistory(); }
+    render();
+  },
+  moreLog: () => { S.ui.logN += 20; render(); },
+  toggleMember: el => { S.ui.memberOpen = S.ui.memberOpen === el.dataset.id ? null : el.dataset.id; S.ui.confirm = null; render(); },
+  toggleInvite: () => { S.ui.inviteOpen = !S.ui.inviteOpen; render(); },
   restoreTitle: async el => {
     const x = S.trash.find(z => z.id === el.dataset.id);
     if (!x) return;
@@ -2139,7 +2514,7 @@ const ACT = {
   },
   removeSite: async el => {
     const i = +el.dataset.i, sites = ((S.streaming && S.streaming.sites) || []).filter((_, j) => j !== i);
-    try { await sent(F.setDoc(F.doc(F.db, 'settings', 'streaming'), { sites })); S.ui.confirm = null; toast('Site retiré.'); }
+    try { await saveStreaming({ sites }); S.ui.confirm = null; toast('Site retiré.'); }
     catch (e) { toast(errText(e)); }
   },
 
@@ -2196,7 +2571,7 @@ const SUBMIT = {
       }));
       toast(`${item.title} envoyé à ${OWNER}.`);
     }
-    S.manual = { title: '', genre: '', fam: 'aven', total: '', year: '', cover: '' };
+    S.manual = { title: '', genres: [], fam: 'aven', famManual: false, total: '', year: '', cover: '' };
     Object.assign(A, { manual: false, q: '', results: [], chosen: null, note: '', searched: false });
   },
   fixSearch: async () => {
@@ -2205,6 +2580,35 @@ const SUBMIT = {
     try { S.fix.results = await searchTitles(t.kind, S.fix.q, { limit: 8 }); }
     catch (e) { toast(errText(e)); }
     S.fix.busy = false;
+  },
+  addBlocker: async () => {
+    const B = S.newBlocker, name = B.name.trim(), url = B.url.trim();
+    if (!name || !validUrl(url)) { toast('Il faut un nom et une adresse qui commence par https://'); return; }
+    await saveStreaming({ adblockers: [...blockerList(), { name: name.slice(0, 40), url, where: B.where, note: B.note.trim().slice(0, 140), star: false }] });
+    S.newBlocker = { name: '', url: '', note: '', where: B.where };
+    toast(`${name} ajouté.`);
+  },
+  addGenre: async () => {
+    const N = S.newGenre, name = N.name.trim().replace(/\s+/g, ' '), id = genreKey(name);
+    if (!id) return;
+    if (genreList().some(g => g.id === id)) { toast(`« ${name} » existe déjà.`); return; }
+    const list = [...genreList(), { id, name: name.charAt(0).toUpperCase() + name.slice(1), fam: N.fam }];
+    S.genreDoc = { list };
+    await saveCatalog(list);
+    N.name = '';
+    toast(`Genre « ${name} » créé.`);
+  },
+  saveGenre: async () => {
+    const N = S.newGenre, g = genreById(N.edit), name = (N.editName || '').trim().replace(/\s+/g, ' ');
+    if (!g || !name) return;
+    if (genreList().some(x => x.id !== g.id && genreKey(x.name) === genreKey(name))) { toast(`« ${name} » existe déjà.`); return; }
+    const list = genreList().map(x => (x.id === g.id ? { ...x, name, fam: N.editFam } : x));
+    const b = F.writeBatch(F.db);
+    if (name !== g.name) retagTitles(b, list, g.id, false); else S.genreDoc = { list };
+    saveCatalog(list, b);
+    await sent(b.commit());
+    N.edit = null;
+    toast('Genre enregistré.');
   },
   savePseudo: async () => {
     const P = S.profile, pseudo = P.pseudo.trim().replace(/\s+/g, ' '), key = pseudoKey(pseudo);
@@ -2236,7 +2640,7 @@ const SUBMIT = {
     try { ok = ['http:', 'https:'].includes(new URL(url).protocol); } catch (e) { /* adresse invalide */ }
     if (!name || !ok) { toast('Il faut un nom et une adresse qui commence par https://'); return; }
     const sites = ((S.streaming && S.streaming.sites) || []).concat([{ name: name.slice(0, 40), url, note: note.slice(0, 120) }]);
-    await sent(F.setDoc(F.doc(F.db, 'settings', 'streaming'), { sites }));
+    await saveStreaming({ sites });
     S.newSite = { name: '', url: '', note: '' };
     toast(`${name} ajouté.`);
   },
@@ -2272,14 +2676,23 @@ const INPUT = {
   q: el => { S.ui.q = el.value; render(); },
   addq: el => { S.add.q = el.value; clearTimeout(addTimer); addTimer = setTimeout(runAddSearch, 450); },
   addNote: el => { S.add.note = el.value; },
-  manual: el => { S.manual[el.dataset.field] = el.value; if (el.tagName === 'SELECT') render(); else scheduleRender(); },
+  manual: el => { S.manual[el.dataset.field] = el.value; if (el.dataset.field === 'fam') S.manual.famManual = true; if (el.tagName === 'SELECT') render(); else scheduleRender(); },
   fixq: el => { S.fix.q = el.value; },
   nmEmail: el => { S.newMember.email = el.value; },
   pseudo: el => { S.profile.pseudo = el.value; },
+  mq: el => { S.ui.mq = el.value; scheduleRender(); },
+  ngName: el => { S.newGenre.name = el.value; },
+  blkName: el => { S.newBlocker.name = el.value; },
+  blkUrl: el => { S.newBlocker.url = el.value; },
+  blkNote: el => { S.newBlocker.note = el.value; },
+  ngFam: el => { S.newGenre.fam = el.value; },
+  egName: el => { S.newGenre.editName = el.value; },
+  egFam: el => { S.newGenre.editFam = el.value; },
   siteName: el => { S.newSite.name = el.value; },
   siteUrl: el => { S.newSite.url = el.value; },
   siteNote: el => { S.newSite.note = el.value; },
-  draft: el => { S.draft[el.dataset.field] = el.value; if (el.tagName === 'SELECT') render(); else scheduleRender(); },
+  draft: el => { S.draft[el.dataset.field] = el.value; if (el.dataset.field === 'fam') S.draft.famManual = true; if (el.tagName === 'SELECT') render(); else scheduleRender(); },
+  genreQ: el => { S.gq[el.dataset.ctx] = el.value; scheduleRender(); },
   draftNum: el => { S.draft[el.dataset.field] = el.value === '' ? null : Math.max(0, parseInt(el.value, 10) || 0); scheduleRender(); }
 };
 
@@ -2326,6 +2739,7 @@ window.addEventListener('hashchange', () => {
   S.ui.sheet = null;
   const r = route();
   if (r.name !== 'title') S.draft = null;
+  if (r.section && r.section !== S.ui.section) { S.ui.genres = []; S.ui.fam = null; }
   render();
   window.scrollTo(0, 0);
 });

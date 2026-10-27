@@ -34,16 +34,18 @@ Le site est réservé à quelques invités. Chacun a un rôle et un pseudo, peut
 - **Quatre sections :** Animes, Mangas, Séries, Films.
 - **Statuts :** En cours, À voir, En pause, Abandonné, Terminé. Un film n'en a que trois : À voir, Vu, Abandonné.
 - **Affiches automatiques :** elles sont cherchées chez Kitsu, TMDB ou AniList (voir plus bas), avec un squelette de chargement et un fondu.
-- **Filtres et tri :** recherche, filtre par genre (11 familles de couleurs), tri A → Z, par genre, par statut ou par activité.
-- **Nouveaux épisodes de la semaine :** la liste des animes en cours qui sortent un épisode dans les 7 jours, à l'heure de Paris.
+- **Genres :** un titre peut en avoir plusieurs, choisis dans un catalogue commun d'environ 75 genres (Isekai, Seinen, Policier, Mecha, Tranche de vie…). Chaque genre appartient à une des 11 familles de couleurs, et le premier genre d'un titre donne la couleur de son affiche.
+- **Filtres et tri :** recherche, filtre par un ou plusieurs genres (on ne voit que les titres qui les ont tous), spectre des couleurs sur ordinateur, tri A → Z, par genre, par statut ou par activité.
+- **Nouveaux épisodes de la semaine :** la liste des animes en cours qui sortent un épisode dans les 7 jours, à l'heure de Paris. Le bloc n'apparaît que s'il y a quelque chose à montrer.
 - **Tirage au sort « Je regarde quoi ce soir ? » :** un titre au hasard parmi les « À voir ». Le même titre ne sort jamais deux fois de suite, un compteur affiche le nombre de tirages, et il y a deux boutons : *Effacer* et *Je le commence*.
 - **Temps restant :** affiché sur les cartes en cours, par exemple « ≈ 8 h restantes ».
-- **Coups de cœur et activité :** une rangée de coups de cœur et une liste des derniers changements.
+- **Coups de cœur et activité :** une rangée de coups de cœur, et « Récemment chez Linerol » dans un encart repliable (replié par défaut, l'appareil se souvient du choix).
 - **Changements en direct :** une carte modifiée par quelqu'un d'autre s'allume brièvement.
 
 ### La fiche d'un titre
 - **Progression :** statut, saison, épisode ou chapitre, avec des boutons + et −. La fiche indique aussi le reste à voir : « Reste 20 épisodes · ≈ 8 h ».
-- **Avis :** une note sur 10, un avis écrit, les dates de début et de fin, le genre et la couleur.
+- **Avis :** une note sur 10, un avis écrit, les dates de début et de fin.
+- **Genres :** on en ajoute ou retire dans un sélecteur avec recherche. L'admin peut créer un genre en le tapant. La couleur de l'affiche suit le premier genre, sauf si on la choisit soi-même.
 - **Type du titre :** on peut passer par exemple d'anime à manga. La progression est convertie (épisodes ↔ chapitres) et une nouvelle affiche est proposée.
 - **Où le regarder en France :** les plateformes légales (abonnement, location, achat), via TMDB et JustWatch.
 - **Corriger l'affiche :** on cherche le bon titre dans les sources et on choisit le résultat.
@@ -52,14 +54,15 @@ Le site est réservé à quelques invités. Chacun a un rôle et un pseudo, peut
 
 ### Ajouter et suggérer
 - **Recherche dans plusieurs sources, avec bascule automatique :** si une source ne répond pas, la suivante prend le relais.
-- **Création à la main** si le titre est introuvable ou si toutes les sources sont en panne : titre, genre, couleur, total, année et image (facultative), avec un aperçu de l'affiche.
+- **Création à la main** si le titre est introuvable ou si toutes les sources sont en panne : titre, genres, couleur, total, année et image (facultative), avec un aperçu de l'affiche.
 - **Suggestions des membres :** les membres votent pour les suggestions des autres, et Linerol les valide dans « À valider ».
 
 ### Pour Linerol (admin)
 - **À valider :** les suggestions, les modifications proposées par les éditeurs et les demandes d'accès.
-- **Membres :** inviter un email, choisir son rôle, copier un message d'invitation, retirer quelqu'un.
-- **Stats :** temps passé devant l'écran, temps restant, répartition par genre et par statut, titres terminés par année, historique complet, export de toutes les données en JSON.
-- **Où regarder :** la liste des sites de streaming, que Linerol remplit lui-même, et des conseils de bloqueurs de pub pour ordinateur et téléphone.
+- **Membres :** une ligne compacte par membre (pseudo, email, rôle). On la touche pour changer le rôle, copier le message d'invitation ou retirer l'accès. Le formulaire d'invitation se déplie au besoin, une recherche apparaît au-delà de 6 membres, et le journal des membres est repliable et paginé.
+- **Genres :** créer un genre, le renommer, changer sa famille de couleur ou le supprimer (il est alors retiré des titres qui l'avaient).
+- **Stats :** temps passé devant l'écran, temps restant, genres les plus présents, répartition par statut, titres terminés par année, export de toutes les données en JSON. L'historique est repliable, groupé par jour, et s'affiche par pages (15, puis 30 de plus).
+- **Où regarder :** les sites de streaming et les bloqueurs de pub (ordinateur et téléphone), que Linerol gère lui-même. Il peut mettre un bloqueur en avant ★ : par défaut, c'est Adblock Plus pour Google Chrome.
 
 ### Confort
 - **Hors connexion :** la liste s'ouvre sans réseau. Les changements faits hors ligne partent tout seuls au retour de la connexion, et un bandeau prévient quand on est hors ligne.
@@ -94,7 +97,7 @@ mywatchlist/
 ├── js/
 │   ├── app.js             État, routage, écrans, actions, écoutes Firestore
 │   ├── config.js          Configuration Firebase, nom du propriétaire, clé TMDB
-│   ├── data.js            Familles de genres, statuts, types, liste de départ
+│   ├── data.js            Familles de couleurs, catalogue de genres par défaut, statuts, types, liste de départ
 │   ├── external.js        Recherche et métadonnées (Kitsu, TMDB, AniList, TVmaze)
 │   └── firebase.js        Point d'entrée unique vers le SDK Firebase (CDN officiel)
 ├── img/
@@ -108,7 +111,7 @@ mywatchlist/
 ### Fonctionnement de `app.js`
 - **État :** un seul objet `S` contient tout (utilisateur, rôle, titres, demandes, interface).
 - **Rendu :** `render()` reconstruit la page à partir de l'état, en gardant le focus et la position du curseur dans les champs.
-- **Routage par ancre :** `#/animes`, `#/mangas`, `#/series`, `#/films`, `#/titre/<id>`, `#/ajouter`, `#/valider`, `#/membres`, `#/stats`, `#/avis`, `#/aide`, `#/profil`, `#/ou-regarder`, `#/corbeille`.
+- **Routage par ancre :** `#/animes`, `#/mangas`, `#/series`, `#/films`, `#/titre/<id>`, `#/ajouter`, `#/valider`, `#/membres`, `#/genres`, `#/stats`, `#/avis`, `#/aide`, `#/profil`, `#/ou-regarder`, `#/corbeille`.
 - **Événements délégués :** les éléments portent `data-act` (clic), `data-in` (saisie) ou `data-submit` (formulaire). Chacun renvoie à une fonction des objets `ACT`, `INPUT` et `SUBMIT`.
 - **Écritures :** elles passent par `sent()`, qui ne bloque pas l'écran hors connexion. Le cache local applique le changement tout de suite et l'envoie au retour du réseau.
 
@@ -119,6 +122,7 @@ mywatchlist/
 | `mw:decisions:<email>` | Dernière lecture des réponses aux demandes |
 | `mw:meta3:<id>` | Affiche et infos trouvées pour un titre |
 | `mw:prov:<type>:<id>` | Plateformes de streaming, gardées 24 h |
+| `mw:fold:<encart>` | Encart ouvert ou replié (récemment, historique, journal des membres) |
 
 Le cache Firestore (IndexedDB) garde en plus une copie de la base pour le mode hors connexion.
 
@@ -157,17 +161,20 @@ Chaque type essaie plusieurs sources dans l'ordre, et la première qui répond g
 | `history` | automatique | `at`, `by`, `byName`, `text` | membres | admin |
 | `adminLog` | automatique | journal des membres et des accès | admin | admin |
 | `accessRequests` | email | `email`, `note`, `at` | admin, et le demandeur | le demandeur ; suppression par l'admin |
-| `settings/streaming` | `streaming` | `sites` : `{ name, url, note }` | membres | admin |
+| `settings/streaming` | `streaming` | `sites` : `{ name, url, note }` ; `adblockers` : `{ name, url, where (pc ou mobile), note, star }` | membres | admin |
+| `settings/genres` | `genres` | `list` : `{ id, name, fam }`, le catalogue des genres | membres | admin |
 
 **Champs d'un titre :**
 
 | Groupe | Champs |
 |---|---|
-| Identité | `title`, `altTitle`, `kind` (`anime`, `manga`, `serie`, `film`), `genre`, `fam` (famille de couleur) |
+| Identité | `title`, `altTitle`, `kind` (`anime`, `manga`, `serie`, `film`), `genres` (identifiants du catalogue), `genre` (les mêmes en texte), `fam` (famille de couleur) |
 | Statut et progression | `status`, `season`, `episode`, `chapter`, `total` |
 | Avis | `rating`, `review`, `startedAt`, `finishedAt`, `fav` |
 | Source | `cover`, `source` (`kitsu`, `tmdb`, `anilist`, `tvmaze`, `manual`), `tmdbType`, `extId`, `malId`, `duration` (min par épisode), `year`, `lookup`, `metaTried` |
 | Dates techniques | `createdAt`, `updatedAt` |
+
+**Genres des anciens titres :** à la première ouverture par l'admin, le texte libre `genre` est converti en liste `genres` (« Dark fantasy historique » → Dark fantasy + Historique). Les mots inconnus deviennent de nouveaux genres, dans la famille de couleur du titre. Les genres venus des API (souvent en anglais) sont traduits vers le catalogue par une table de correspondance (`genreNamesFor` dans `data.js`).
 
 Certains anciens documents (`seen`, `follows`, `votes`, `requests.by`) sont encore rangés sous l'email. Les règles et le code acceptent les deux formats, et les nouveaux documents utilisent l'identifiant du compte.
 
@@ -177,7 +184,7 @@ Certains anciens documents (`seen`, `follows`, `votes`, `requests.by`) sont enco
 
 - **Aucun secret dans le code :** les valeurs de `config.js` (configuration Firebase, clé TMDB) sont publiques par nature. Ce sont les règles Firestore qui protègent les données.
 - **Accès :** il faut un compte avec un email vérifié et présent dans `members`. Sinon, on ne lit rien.
-- **Écritures :** seul l'admin modifie la liste, les membres, l'historique, la corbeille et les réglages. Un éditeur ne peut que déposer une demande « en attente », en son propre nom.
+- **Écritures :** seul l'admin modifie la liste, les membres, l'historique, la corbeille et les réglages (genres, sites, bloqueurs). Un éditeur ne peut que déposer une demande « en attente », en son propre nom.
 - **Emails :** les membres voient uniquement les pseudos (collection `pseudos`) ; seul l'admin lit `members`.
 - **Clé API Firebase :** elle est restreinte aux sites `https://linerol.github.io/*`, `https://mywatchlist-3fe82.firebaseapp.com/*` (liens des emails) et `http://localhost/*`.
 - **Discrétion :** la page porte `noindex, nofollow`.
